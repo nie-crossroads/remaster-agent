@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>legacy-demo</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>legacy-demo</name>
+    <description>
+        被 RemasterAgent 迁移的遗留工程样例。源码写法停留在 JDK 8 时代，
+        目标是把 src/main/java/com/example/legacy/LegacySalesReport.java 现代化到 JDK 21 惯用法。
+    </description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!--
+          release 为什么是 21 而不是 8：
+          沙箱用 JDK 21 构建，迁移目标也是 JDK 21。本工程「遗留」之处在【源码写法】
+          （Date/Calendar/SimpleDateFormat、匿名内部类、显式装箱、手工字符串拼接），
+          不在编译级别。若把 release 钉在 8，模型按提示词产出的 text block 会被 javac 直接拒绝 ——
+          那不是「模型改错了」，而是评测环境自己设的陷阱。
+
+          pom 与依赖坐标的升级（Spring Boot 2 → 3、javax → jakarta）属于阶段 2
+          「多文件 + 构建描述改写」的范围，本工程刻意不涉及。
+        -->
+        <maven.compiler.release>21</maven.compiler.release>
+        <junit.version>5.12.2</junit.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 版本显式钉死：评测结果必须可复现，不能让「换个插件版本」改变结论 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.1</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.6</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

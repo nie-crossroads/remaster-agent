@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.remasteragent</groupId>
+    <artifactId>remaster-agent-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>remaster-agent-core</artifactId>
+  <name>remaster-agent-core</name>
+  <description>【核心】DAG 调度 / 状态机 / checkpoint / 失败回退 —— 刻意不依赖 Spring Web，保证编排逻辑可纯单测</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.remasteragent</groupId>
+      <artifactId>remaster-agent-common</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.remasteragent</groupId>
+      <artifactId>remaster-agent-tools</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.remasteragent</groupId>
+      <artifactId>remaster-agent-llm</artifactId>
+    </dependency>
+
+    <!-- 状态树与 checkpoint 的读写 -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-jdbc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+    </dependency>
+
+    <!--
+      任务队列（Stream）与进度事件（Pub/Sub）的 Redis 适配器住在 core 里：
+      它们被 API 与 Worker 两个进程共用，而本项目没有独立的 infra 模块。
+      core 只依赖接口（TaskQueue / ProgressPublisher / ProgressEventSubscriber），
+      Redis 只是其中一种实现 —— 单测里换成内存实现即可，不连 Redis。
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+
+    <!-- result 字段是 JSONB，需要序列化 -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <!--
+      java.time 支持必须显式声明。ProgressEvent 带 Instant，而 Worker 进程没有
+      spring-boot-starter-web，拿不到 Spring Boot 那份注册了 JavaTimeModule 的 mapper。
+      靠传递依赖「碰巧能编译」是这类缺陷最喜欢藏身的地方，所以这里写死。
+    -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+</project>

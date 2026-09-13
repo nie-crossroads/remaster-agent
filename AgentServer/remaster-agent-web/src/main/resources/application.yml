@@ -1,0 +1,107 @@
+# ============================================================================
+# API 进程配置
+#
+# 运行方式：在 AgentServer/ 目录下
+#   mvn.cmd -pl remaster-agent-web spring-boot:run
+# 该进程只写状态与投递队列，不执行迁移（除非显式打开 worker.embedded）
+# ============================================================================
+
+server:
+  port: ${REMASTER_API_PORT:8080}
+
+spring:
+  application:
+    name: remaster-agent-api
+
+  # 见 worker 的 application.yml —— 三路径是为了适配不同的启动工作目录
+  config:
+    import:
+      - optional:file:../../.env[.properties]
+      - optional:file:../.env[.properties]
+      - optional:file:.env[.properties]
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:127.0.0.1}:${POSTGRES_PORT:5432}/${POSTGRES_DB:remaster}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:}
+    hikari:
+      pool-name: remaster-api-pool
+      maximum-pool-size: 10
+
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      # 命令超时必须 > 队列阻塞读取时长（QueueProperties.blockMillis 默认 5000ms）。
+      # 设 3s 会导致空闲时 XREADGROUP 每轮在 3s 处被 Lettuce 打断并报 RedisCommandTimeoutException。
+      timeout: 10s
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: "0"
+    validate-on-migrate: true
+
+  jackson:
+    # 时间统一用 ISO-8601 字符串而不是时间戳数字：前端的 Date 解析、日志、curl 调试
+    # 都更可读，而序列化体积在这个量级完全不是问题
+    serialization:
+      write-dates-as-timestamps: false
+
+remaster:
+  core:
+    max-rewrite-attempts: 2
+    workspace-root: .remaster-workspaces
+
+  # API 进程不跑沙箱，但装配 SandboxExecutor 时仍会读这些值做校验，
+  # 所以必须配齐（否则 SandboxConfig 会拿到 null）
+  sandbox:
+    mode: ${SANDBOX_MODE:local}
+    memory-limit-mb: ${SANDBOX_MEMORY_LIMIT_MB:1024}
+    timeout-seconds: ${SANDBOX_TIMEOUT_SECONDS:600}
+    maven-home: ${MAVEN_HOME}
+    maven-settings: ${MAVEN_SETTINGS}
+    maven-local-repo: ${MAVEN_LOCAL_REPO}
+
+  llm:
+    base-url: ${LLM_BASE_URL}
+    api-key: ${LLM_API_KEY}
+    model: ${LLM_MODEL}
+    rewrite-model: ${LLM_MODEL_REWRITE}
+    # 见 worker 的 application.yml 说明
+    input-price-per-million: ${LLM_INPUT_PRICE:0}
+    output-price-per-million: ${LLM_OUTPUT_PRICE:0}
+
+  worker:
+    # true = Worker 跑在 API 进程内（开发省事）；部署与演示请设 false，用独立 Worker 进程。
+    # 两种方式共用同一个 TaskConsumer 和同一个 Redis Stream，只是进程边界不同
+    embedded: ${REMASTER_WORKER_EMBEDDED:false}
+
+  queue:
+    stream-key: remaster:tasks
+    consumer-group: remaster-workers
+    batch-size: 1
+    block-millis: 5000
+    reclaim-min-idle-seconds: 60
+
+  web:
+    allowed-origins: ${REMASTER_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+    sse-heartbeat-millis: 20000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    root: INFO
+    com.remasteragent: INFO
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"

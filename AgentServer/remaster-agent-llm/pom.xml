@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.remasteragent</groupId>
+    <artifactId>remaster-agent-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>remaster-agent-llm</artifactId>
+  <name>remaster-agent-llm</name>
+  <description>LLM 接入层：模型配置 / 改写器 / 多模型路由 —— 只做「调模型」，不碰持久化</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.remasteragent</groupId>
+      <artifactId>remaster-agent-common</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j-open-ai</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+    </dependency>
+
+    <!-- @ConfigurationProperties / @EnableConfigurationProperties 在 spring-boot 这个包里，
+         不是 spring-context。引 spring-boot 而不是 spring-boot-starter，避免把 web 带进来。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot</artifactId>
+    </dependency>
+
+    <!-- 显式声明：模型返回的结构化 JSON 由我们自己解析，不依赖 langchain4j 的传递依赖 -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+</project>

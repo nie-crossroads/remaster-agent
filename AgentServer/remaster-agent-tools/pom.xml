@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.remasteragent</groupId>
+    <artifactId>remaster-agent-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>remaster-agent-tools</artifactId>
+  <name>remaster-agent-tools</name>
+  <description>代码理解与执行工具：AST 解析 / 沙箱执行 / 构建结果解析 / 建库引导 —— 本项目的护城河层</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.remasteragent</groupId>
+      <artifactId>remaster-agent-common</artifactId>
+    </dependency>
+
+    <!-- 代码理解：必须用 symbol-solver，纯 core 拿不到跨模块类型信息 -->
+    <dependency>
+      <groupId>com.github.javaparser</groupId>
+      <artifactId>javaparser-symbol-solver-core</artifactId>
+    </dependency>
+
+    <!-- 生成 unified diff 供前端 Monaco 展示 -->
+    <dependency>
+      <groupId>io.github.java-diff-utils</groupId>
+      <artifactId>java-diff-utils</artifactId>
+    </dependency>
+
+    <!-- 建库引导与沙箱外的直连探针需要 JDBC 驱动 -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+    </dependency>
+
+    <!-- 数据库迁移：建库用原生 JDBC，建表用 Flyway 管版本 -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+    </dependency>
+
+    <!-- 沙箱参数用 @ConfigurationProperties 注入 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+    <!-- 独立工具类（bootstrap / migrate / probe）脱离 Spring 运行时需要自己的日志实现。
+         标 optional 是为了不传递给 web / worker —— 它们由 spring-boot-starter 提供 logback。 -->
+    <dependency>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+</project>

@@ -1,0 +1,151 @@
+/*
+ * 全局样式。
+ *
+ * ElementPlus 提供完整 design token；这里只补三件它没默认给的：
+ *   - 让 .app-shell 用 grid 真正成为「左列右侧」两栏
+ *   - 给 SSE 状态指示灯统一颜色（与 status 字典里那个 tag 颜色保持一致）
+ *   - 把 Monaco diff 编辑器的背景换成深色（默认跟系统走，在亮主题页面里会很突兀）
+ */
+
+:root {
+  --bg-page: #f5f7fa;
+  --bg-card: #ffffff;
+  --text-primary: #1f2329;
+  --text-muted: #8c9196;
+  --border-soft: #e4e6eb;
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --color-success: #67c23a;
+  --color-warning: #e6a23c;
+  --color-danger: #f56c6c;
+  --color-info: #909399;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', Roboto, sans-serif;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  height: 100vh;
+}
+
+.app-shell > aside {
+  background: var(--bg-card);
+  border-right: 1px solid var(--border-soft);
+  overflow-y: auto;
+}
+
+.app-shell > main {
+  overflow-y: auto;
+  padding: 20px 28px;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-card);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.app-header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.app-header .header-meta {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.sse-state-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+.sse-state-dot.open {
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px rgba(103, 194, 58, 0.18);
+}
+
+.sse-state-dot.connecting {
+  background: var(--color-warning);
+}
+
+.sse-state-dot.error,
+.sse-state-dot.closed {
+  background: var(--color-danger);
+}
+
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 16px 0 8px;
+}
+
+.card {
+  background: var(--bg-card);
+  border-radius: 6px;
+  box-shadow: var(--shadow-card);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 64px 16px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.empty-state .hint {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+/*
+ * Monaco diff 编辑器在亮色页面下默认背景是 VS 暗色，跟周围脱节。
+ * 强制让它走 design token 的卡片背景，看起来像同一个东西。
+ */
+.monaco-diff-container {
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+}

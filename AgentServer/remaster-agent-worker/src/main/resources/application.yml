@@ -1,0 +1,92 @@
+# ============================================================================
+# Worker 进程配置
+#
+# 运行方式：在 AgentServer/ 目录下
+#   mvn.cmd -pl remaster-agent-worker spring-boot:run
+# 或运行打包后的 jar（工作目录不同，见下面的 config.import 多路径）
+# ============================================================================
+
+spring:
+  application:
+    name: remaster-agent-worker
+
+  # .env 不在 classpath 里（它在仓库根、且被 .gitignore 忽略），所以显式导入。
+  # 三个路径是为了让「从模块目录跑」「从 AgentServer 跑」「从仓库根跑」都能找到 ——
+  # 相对路径是相对“进程工作目录”解析的，而工作目录取决于怎么启动。
+  # [.properties] 是扩展名提示：文件叫 .env，没有它 Spring 不知道该用哪个解析器。
+  config:
+    import:
+      - optional:file:../../.env[.properties]
+      - optional:file:../.env[.properties]
+      - optional:file:.env[.properties]
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:127.0.0.1}:${POSTGRES_PORT:5432}/${POSTGRES_DB:remaster}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:}
+    hikari:
+      pool-name: remaster-worker-pool
+      # Worker 是单线程顺序执行任务，不需要大连接池；
+      # 池子越小，越容易在压测里立刻暴露「连接没归还」这类问题
+      maximum-pool-size: 6
+
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      # 命令超时必须【大于】queue.block-millis：XREADGROUP 是阻塞命令，
+      # 超时若更短，每次阻塞读都会被客户端判成超时，表现为「队列一直报错但 Redis 是好的」
+      timeout: 12s
+
+  # 启动时自动迁移数据库表结构（业务表 + 向量表 repo / code_chunk 同库，
+  # 都在 classpath:db/migration 一套脚本里，见 docs/ARCHITECTURE.md ADR-11）。
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: "0"
+    validate-on-migrate: true
+
+remaster:
+  core:
+    # 最多 2 次重试 = 最多 3 轮改写。每次重试都是一次完整「调模型 + 跑沙箱」，
+    # 超过 3 轮通常说明问题不在模型的随机性，而在工程本身，继续只是烧钱
+    max-rewrite-attempts: 2
+    workspace-root: .remaster-workspaces
+
+  sandbox:
+    mode: ${SANDBOX_MODE:local}
+    memory-limit-mb: ${SANDBOX_MEMORY_LIMIT_MB:1024}
+    timeout-seconds: ${SANDBOX_TIMEOUT_SECONDS:600}
+    maven-home: ${MAVEN_HOME}
+    maven-settings: ${MAVEN_SETTINGS}
+    maven-local-repo: ${MAVEN_LOCAL_REPO}
+
+  llm:
+    base-url: ${LLM_BASE_URL}
+    api-key: ${LLM_API_KEY}
+    model: ${LLM_MODEL}
+    rewrite-model: ${LLM_MODEL_REWRITE}
+    # 成本估算单价（每百万 token）。llm_call 表存的是真实 token 用量，
+    # 金额由这两个单价换算 —— 所以换模型后必须同步改，否则成本指标会失真。
+    # 默认 0：宁可显示「未配置」也不猜一个数，猜出来的成本比没有成本更糟。
+    input-price-per-million: ${LLM_INPUT_PRICE:0}
+    output-price-per-million: ${LLM_OUTPUT_PRICE:0}
+
+  queue:
+    stream-key: remaster:tasks
+    consumer-group: remaster-workers
+    batch-size: 1
+    block-millis: 5000
+    # 超过 60 秒未确认的消息视为「上一个 Worker 被杀留下的」，由本实例接管重跑。
+    # 不能设得太小：正在跑的任务可能长时间不产生新消息（比如沙箱构建），
+    # 阈值太小会把「活着但很慢」误判成「死了」
+    reclaim-min-idle-seconds: 60
+
+logging:
+  level:
+    root: INFO
+    com.remasteragent: INFO
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"

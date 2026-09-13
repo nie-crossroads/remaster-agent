@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.16</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.remasteragent</groupId>
+  <artifactId>remaster-agent-parent</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <name>remaster-agent-parent</name>
+  <description>RemasterAgent —— 给遗留 Java 系统做一次可验证的重制（保留业务逻辑，只提升技术栈）</description>
+
+  <modules>
+    <module>remaster-agent-common</module>
+    <module>remaster-agent-llm</module>
+    <module>remaster-agent-tools</module>
+    <module>remaster-agent-core</module>
+    <module>remaster-agent-web</module>
+    <module>remaster-agent-worker</module>
+  </modules>
+
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <langchain4j.version>1.20.0</langchain4j.version>
+    <javaparser.version>3.28.2</javaparser.version>
+    <pgvector.version>0.1.6</pgvector.version>
+    <java-diff-utils.version>4.17</java-diff-utils.version>
+    <remaster-agent.version>0.1.0-SNAPSHOT</remaster-agent.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- LangChain4j 核心模块统一走 BOM，避免各 artifact 版本打架 -->
+      <dependency>
+        <groupId>dev.langchain4j</groupId>
+        <artifactId>langchain4j-bom</artifactId>
+        <version>${langchain4j.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <!-- 本项目内部模块 -->
+      <dependency>
+        <groupId>com.remasteragent</groupId>
+        <artifactId>remaster-agent-common</artifactId>
+        <version>${remaster-agent.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.remasteragent</groupId>
+        <artifactId>remaster-agent-llm</artifactId>
+        <version>${remaster-agent.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.remasteragent</groupId>
+        <artifactId>remaster-agent-tools</artifactId>
+        <version>${remaster-agent.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.remasteragent</groupId>
+        <artifactId>remaster-agent-core</artifactId>
+        <version>${remaster-agent.version}</version>
+      </dependency>
+
+      <!-- 第三方工具库：Spring Boot BOM 不管，必须显式写版本 -->
+      <dependency>
+        <groupId>com.github.javaparser</groupId>
+        <artifactId>javaparser-symbol-solver-core</artifactId>
+        <version>${javaparser.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.pgvector</groupId>
+        <artifactId>pgvector</artifactId>
+        <version>${pgvector.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.java-diff-utils</groupId>
+        <artifactId>java-diff-utils</artifactId>
+        <version>${java-diff-utils.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <configuration>
+            <release>${maven.compiler.release}</release>
+            <compilerArgs>
+              <arg>-parameters</arg>
+            </compilerArgs>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <configuration>
+            <argLine>-Dfile.encoding=UTF-8</argLine>
+          </configuration>
+        </plugin>
+        <!-- 用于跑一次性工具类：建库引导、环境探针 -->
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>exec-maven-plugin</artifactId>
+          <version>3.6.3</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+
+</project>

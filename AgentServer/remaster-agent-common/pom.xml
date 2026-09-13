@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.remasteragent</groupId>
+    <artifactId>remaster-agent-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>remaster-agent-common</artifactId>
+  <name>remaster-agent-common</name>
+  <description>领域模型 / 枚举 / 异常 —— 不依赖 Spring，可被所有模块引用（仅引 jackson-annotations 声明 checkpoint 的 JSON 形状）</description>
+
+  <dependencies>
+    <!--
+      只引 annotations，不引 databind：领域记录本身不做序列化，但需要声明
+      「序列化进 dag_node.result 时 JSON 形状是哪些字段」。这是 checkpoint 的格式契约，
+      放在模型旁边最不容易走样（见 VerifyResult 上 @JsonIgnore 的说明）。
+      零传递依赖，不是框架侵入。
+    -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-annotations</artifactId>
+    </dependency>
+
+    <!-- 仅测试需要：用真实 databind 验证 checkpoint 载荷能严格往返（见 CheckpointJsonShapeTest） -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+</project>
