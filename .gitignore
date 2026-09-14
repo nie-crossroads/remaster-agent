@@ -39,6 +39,9 @@ generated-sources/
 # 前端 AgentVue
 # ============================================================
 node_modules/
+# 锁文件不入库：它由本地 npm 版本解析生成，跨机器/跨版本差异极大，
+# 提交它只会制造无意义的巨型 diff 与合并冲突。依赖版本由 package.json 的语义化范围约束。
+package-lock.json
 dist/
 dist-ssr/
 .vite/
