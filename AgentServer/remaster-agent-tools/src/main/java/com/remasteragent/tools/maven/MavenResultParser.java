@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -46,14 +47,31 @@ public final class MavenResultParser {
     /** JaCoCo CSV 报告。 */
     private static final Path JACOCO_CSV = Path.of("target", "site", "jacoco", "jacoco.csv");
 
-    /** 编译错误行，形如 "ERROR] /path/Foo.java:[12,34] cannot find symbol"。 */
-    private static final Pattern COMPILE_ERROR = Pattern.compile(
-            "\\[ERROR].*?\\.java:\\[\\d+,\\d+].*");
+    /** Maven 的日志级别前缀，剥掉它才能拿到诊断正文。 */
+    private static final Pattern LEVEL_PREFIX = Pattern.compile("^\\[(ERROR|WARNING|INFO)]\\s?");
+
+    /**
+     * 编译错误「首行」：定位 + 一句话诊断，形如 {@code /path/Foo.java:[12,34] cannot find symbol}。
+     * 匹配前必须先剥掉 {@code [ERROR]} 前缀。
+     */
+    private static final Pattern COMPILE_ERROR_HEAD = Pattern.compile(
+            "(\\S+\\.java):\\[(\\d+),(\\d+)]\\s*(.*)");
+
+    /**
+     * javac 的<b>明细续行</b>。**必须保留**：首行只说「找不到符号」，是这一行才告诉模型缺的
+     * 到底是哪个符号/在哪个位置。中英文都要认 —— JDK 18+（JEP 400）起 javac 按
+     * {@code stderr.encoding} 输出诊断，中文 Windows 上就是中文。
+     */
+    private static final Pattern COMPILE_ERROR_DETAIL = Pattern.compile(
+            "(符号|位置|symbol|location)\\s*[:：].*");
 
     /** Maven 判定编译失败的标志。 */
     private static final String COMPILATION_ERROR_MARKER = "COMPILATION ERROR";
 
-    /** 默认最多带回多少行编译错误 —— 太多了会稀释 prompt，反而降低重写质量。 */
+    /**
+     * 默认最多带回多少行编译错误 —— 太多了会稀释 prompt，反而降低重写质量。
+     * 取 40 而不是更小，是因为一个可用的错误块通常占 3 行（定位 + 符号 + 位置）。
+     */
     private static final int DEFAULT_MAX_ERROR_LINES = 40;
 
     private MavenResultParser() {
@@ -98,7 +116,7 @@ public final class MavenResultParser {
         boolean compiled = !compilationFailed
                 && (tests.ran() || result.exitCode() == 0);
 
-        String failureExcerpt = buildFailureExcerpt(compilationFailed, console, tests);
+        String failureExcerpt = buildFailureExcerpt(compilationFailed, console, tests, projectDir);
 
         return new VerifyResult(
                 compiled,
@@ -215,10 +233,13 @@ public final class MavenResultParser {
     /**
      * 组装喂回给 REWRITE 的失败摘要。
      *
-     * <p>只带三类信息：失败的测试用例名、编译错误的定位行。整段 Maven 日志喂回去
+     * <p>只带两类信息：失败的测试用例名、编译错误的**错误块**。整段 Maven 日志喂回去
      * 既贵又会把关键信息淹掉 —— prompt 里塞一万行没用的 INFO，模型照样抓不住重点。
+     *
+     * @param projectDir 沙箱工作目录，用于把绝对路径改写成工程内相对路径（让 prompt 更短更好读）
      */
-    private static String buildFailureExcerpt(boolean compilationFailed, String console, TestSummary tests) {
+    private static String buildFailureExcerpt(boolean compilationFailed, String console,
+                                              TestSummary tests, Path projectDir) {
         StringBuilder sb = new StringBuilder();
 
         if (!tests.failedNames().isEmpty()) {
@@ -228,27 +249,139 @@ public final class MavenResultParser {
         }
 
         if (compilationFailed || sb.length() == 0) {
-            List<String> errorLines = extractCompileErrors(console, DEFAULT_MAX_ERROR_LINES);
-            if (!errorLines.isEmpty()) {
-                sb.append("编译错误:\n");
-                errorLines.forEach(line -> sb.append("  ").append(line).append('\n'));
+            List<String> errorBlocks = extractCompileErrors(console, projectDir, DEFAULT_MAX_ERROR_LINES);
+            if (!errorBlocks.isEmpty()) {
+                sb.append("编译错误（按「符号/位置」修正，不要删改测试依赖的成员）:\n");
+                errorBlocks.forEach(block -> sb.append("  ").append(block).append('\n'));
             }
         }
 
         return sb.toString();
     }
 
-    /** 从控制台输出里抠出编译错误行（仅在这些错误没有对应报告文件时可用的兜底手段）。 */
+    /** 兼容旧签名（不做路径相对化）。 */
     public static List<String> extractCompileErrors(String console, int maxLines) {
-        List<String> errors = new ArrayList<>();
-        if (console == null || console.isBlank()) {
-            return errors;
+        return extractCompileErrors(console, null, maxLines);
+    }
+
+    /**
+     * 从控制台输出里抠出编译错误块。
+     *
+     * <p><b>为什么是「块」而不是「行」</b>：javac 的诊断是两段式的 —— 首行给定位
+     * （{@code Foo.java:[12,34] 找不到符号}），紧跟的缩进行才给细节
+     * （{@code 符号: 方法 formatDate(java.util.Date)}）。只留首行，模型知道「第 12 行有问题」
+     * 却不知道「缺的是什么」，只能瞎猜 —— 实测会出现重试三轮毫无进展、甚至原样返回 diff 为 0 的情况。
+     *
+     * <p>另外两件顺手做掉的事：
+     * <ul>
+     *   <li><b>去重</b>：{@code compile} 与 {@code default-testCompile} 两个阶段会各报一遍同样的错误，
+     *       不去重等于把一半行数预算浪费在重复内容上。</li>
+     *   <li><b>相对化</b>：沙箱绝对路径（{@code E:/.../.remaster-workspaces/task-3/src/...}）又长又夹着
+     *       本次任务的临时目录名，对模型是纯噪声；换成工程内相对路径，语义不变但可读性高得多。</li>
+     * </ul>
+     *
+     * @param projectDir 沙箱工作目录（可为 null，此时不做相对化）
+     * @param maxLines   返回内容的总行数上限（含明细续行）
+     */
+    public static List<String> extractCompileErrors(String console, Path projectDir, int maxLines) {
+        if (console == null || console.isBlank() || maxLines <= 0) {
+            return List.of();
         }
-        Matcher matcher = COMPILE_ERROR.matcher(console);
-        while (matcher.find() && errors.size() < maxLines) {
-            errors.add(matcher.group().trim());
+
+        List<String> finished = new ArrayList<>();
+        List<String> current = null;
+
+        for (String rawLine : console.split("\\R")) {
+            // 剥掉 Maven 的日志级别前缀，拿到诊断正文（明细续行通常也带 [ERROR] 前缀）
+            String body = LEVEL_PREFIX.matcher(rawLine.strip()).replaceFirst("");
+            if (body.isEmpty()) {
+                current = commit(finished, current);
+                continue;
+            }
+            Matcher head = COMPILE_ERROR_HEAD.matcher(body);
+            if (head.matches()) {
+                current = commit(finished, current);
+                current = new ArrayList<>();
+                current.add(relativizePath(head.group(1), projectDir)
+                        + ":[" + head.group(2) + "," + head.group(3) + "] " + head.group(4).strip());
+                continue;
+            }
+            if (current != null && COMPILE_ERROR_DETAIL.matcher(body).matches()) {
+                current.add(body);
+                continue;
+            }
+            current = commit(finished, current);
         }
-        return errors;
+        commit(finished, current);
+
+        // LinkedHashSet：既去重（两个编译阶段重复报同一错误）又保留首次出现顺序
+        List<String> unique = new ArrayList<>(new LinkedHashSet<>(finished));
+
+        List<String> result = new ArrayList<>();
+        int used = 0;
+        for (String block : unique) {
+            int lines = block.split("\n").length;
+            if (used + lines > maxLines) {
+                break;
+            }
+            result.add(block);
+            used += lines;
+        }
+        return result;
+    }
+
+    /** 结束当前错误块：并入结果并返回 null，供循环里一行写完 {@code current = commit(...)}。 */
+    private static List<String> commit(List<String> finished, List<String> current) {
+        if (current != null) {
+            finished.add(String.join("\n  ", current));
+        }
+        return null;
+    }
+
+    /**
+     * 把沙箱工作目录下的绝对路径改写成工程内相对路径（统一成正斜杠）。
+     *
+     * <p>用 {@link Path} 双向解析而不是字符串前缀比对，因为日志里的路径形态不唯一：
+     * 带盘符（{@code E:/...}）、不带盘符（{@code /work/...}）、以及 Maven 在 Windows 上的
+     * {@code /E:/...}（盘符前多一个斜杠）都出现过。统一 {@code toAbsolutePath().normalize()}
+     * 之后再比，前两种都对；第三种由 {@link #toComparablePath} 先抹掉那个多出来的斜杠。
+     *
+     * <p><b>不要拿 {@code isAbsolute()} 当守卫</b>：Windows 上 {@code Path.of("/work/x").isAbsolute()}
+     * 返回 <b>false</b>（没有盘符的根路径不算绝对），拿它过滤会把正是我们要处理的那种写法直接跳过。
+     *
+     * <p>相对路径传进来也无妨 —— 归一化后不会落在工作目录下，自然走「保持原样」分支。
+     * 解析不了就原样返回：路径美化是锦上添花，不值得为它冒抛异常的风险。
+     */
+    private static String relativizePath(String path, Path projectDir) {
+        String forward = path.replace('\\', '/');
+        if (projectDir == null) {
+            return forward;
+        }
+        try {
+            Path root = projectDir.toAbsolutePath().normalize();
+            Path absolute = toComparablePath(path).toAbsolutePath().normalize();
+            if (absolute.startsWith(root)) {
+                return root.relativize(absolute).toString().replace('\\', '/');
+            }
+        } catch (Exception e) {
+            log.debug("相对化路径失败，保持原样: {}", path);
+        }
+        return forward;
+    }
+
+    /** Maven 在 Windows 上打印的 {@code /E:/...} 形态（盘符前多一个斜杠），解析前要抹掉。 */
+    private static final Pattern LEADING_SLASH_BEFORE_DRIVE = Pattern.compile("^/([A-Za-z]:[/\\\\].*)");
+
+    /**
+     * 把路径变成 {@link Path} 能解析的形态。
+     *
+     * <p>Windows 的 {@code Path.of("/E:/x")} 会抛 {@code InvalidPathException: Illegal char <:>}
+     * —— 而 Maven 在 Windows 上恰好就是按 {@code /E:/...} 打印的，不处理的话路径相对化会静默失效
+     * （异常被吞、原样返回，日志里看不出任何异常）。
+     */
+    private static Path toComparablePath(String raw) {
+        Matcher m = LEADING_SLASH_BEFORE_DRIVE.matcher(raw);
+        return Path.of(m.matches() ? m.group(1) : raw);
     }
 
     private static int attr(Element element, String name) {

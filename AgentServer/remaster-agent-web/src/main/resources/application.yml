@@ -55,6 +55,14 @@ remaster:
     max-rewrite-attempts: 2
     workspace-root: .remaster-workspaces
 
+  # 代码 RAG（阶段 2 理解层）。API 进程不执行检索，但配置需齐备（见下 sandbox 的同款说明）。
+  rag:
+    enabled: ${REMASTER_RAG_ENABLED:true}
+    top-k: ${REMASTER_RAG_TOP_K:6}
+    candidate-k: ${REMASTER_RAG_CANDIDATE_K:20}
+    rrf-k: ${REMASTER_RAG_RRF_K:60}
+    neighbor-depth: ${REMASTER_RAG_NEIGHBOR_DEPTH:1}
+
   # API 进程不跑沙箱，但装配 SandboxExecutor 时仍会读这些值做校验，
   # 所以必须配齐（否则 SandboxConfig 会拿到 null）
   sandbox:
@@ -70,6 +78,18 @@ remaster:
     api-key: ${LLM_API_KEY}
     model: ${LLM_MODEL}
     rewrite-model: ${LLM_MODEL_REWRITE}
+    # 见 worker 的 application.yml —— 超时、重试次数、退避与总预算都在那里有完整说明。
+    # API 侧不直接调大模型，但保留同一组配置，避免两个进程对同一份 .env 的解释不一致。
+    timeout-seconds: ${LLM_TIMEOUT_SECONDS:180}
+    max-retries: ${LLM_MAX_RETRIES:2}
+    retry-backoff-millis: ${LLM_RETRY_BACKOFF_MILLIS:2000}
+    call-budget-seconds: ${LLM_CALL_BUDGET_SECONDS:420}
+    # 见 worker 的 application.yml —— 留空则向量路禁用
+    embedding-model: ${LLM_EMBEDDING_MODEL:}
+    embedding-dimensions: ${LLM_EMBEDDING_DIMENSIONS:}
+    # 向量模型的专用网关与 Key；留空则复用上面的 base-url / api-key（见 worker 的说明）
+    embedding-base-url: ${LLM_EMBEDDING_BASE_URL:}
+    embedding-api-key: ${LLM_EMBEDDING_API_KEY:}
     # 见 worker 的 application.yml 说明
     input-price-per-million: ${LLM_INPUT_PRICE:0}
     output-price-per-million: ${LLM_OUTPUT_PRICE:0}
@@ -89,6 +109,11 @@ remaster:
   web:
     allowed-origins: ${REMASTER_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
     sse-heartbeat-millis: 20000
+    # 进度订阅链路探活（见 ProgressLinkWatchdog）。
+    # ping 间隔要明显小于 stale 阈值：至少要能容忍连丢两次心跳才判死，否则网络一抖就重建订阅。
+    # 15s / 45s 意味着「连续 3 次心跳都没回来」才动手，同时保证缓存被回收后 1 分钟内自愈。
+    progress-ping-millis: ${REMASTER_PROGRESS_PING_MILLIS:15000}
+    progress-stale-millis: ${REMASTER_PROGRESS_STALE_MILLIS:45000}
 
 management:
   endpoints:

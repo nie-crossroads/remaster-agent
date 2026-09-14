@@ -7,7 +7,8 @@
  *
  * 对应后端：
  * - TaskView  → com.remasteragent.web.api.dto.TaskView
- * - TaskDetail→ TaskQueryService.taskDetail()（{task, nodes, patches, cost}）
+ * - TaskDetail→ TaskQueryService.taskDetail()（{task, nodes, patches, cost, plan}）
+ * - PlanView  → TaskDetailView.PlanView（阶段 2 规划评审）
  * - ProgressEvent → com.remasteragent.core.progress.ProgressEvent
  */
 
@@ -17,14 +18,34 @@ export type NodeType = 'ANALYZE' | 'PLAN' | 'REWRITE' | 'VERIFY' | 'GATE'
 
 export type NodeStatus = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED'
 
-/** 量化指标汇总。任务未结束时后端返回 null。 */
+/**
+ * 量化指标汇总。任务未结束时后端返回 null。
+ *
+ * ## 为什么三个字段是可选的（这不是「后端有时不返回」的敷衍，是踩出来的）
+ *
+ * 指标有两个来源，后端给它们的**形状**曾经不一致：
+ * - REST 快照（`GET /api/tasks/{id}`）走显式映射，字段齐全；
+ * - SSE 增量（`type: task_metrics`）曾经直接把后端的存储形状序列化发出来，而
+ *   `compilePassRate` / `testPassRate` / `retried` 在后端是**派生方法**（不是 record 字段），
+ *   于是整条增量事件里根本没有这三个键。
+ *
+ * 前端收到增量后是**整体覆盖** `task.metrics` 的，于是文件刚跑完那一刻通过率变成 undefined，
+ * 进度条归零、状态被判失败显示 ✗ —— 而任务明明成功。最迷惑的是 `coverage` 恰好是后端 record
+ * 字段，所以「行覆盖率」一直正常显示，看起来像进度条组件坏了。
+ *
+ * 后端已修（事件改用与快照同形状的 `TaskMetricsSnapshot`），但前端这里**仍然不信任**
+ * 这两个比率字段：始终优先用 `compilePassed / filesTotal` 现算。
+ * 计数是永远都在的，比率是能被算出来的 —— 能从源数据得到的结论，就不要依赖第二份拷贝。
+ */
 export interface Metrics {
   filesTotal: number
   compilePassed: number
-  compilePassRate: number
+  /** 编译通过率 0~1。**可选**：SSE 增量历史上不带该字段，用计数现算即可。 */
+  compilePassRate?: number
   testsTotal: number
   testsPassed: number
-  testPassRate: number
+  /** 单测通过率 0~1。**可选**，同上。 */
+  testPassRate?: number
   /** 行覆盖率 0~1；**-1 表示未采集**（不是 0，前端必须区分） */
   coverage: number
   llmCalls: number
@@ -32,7 +53,8 @@ export interface Metrics {
   completionTokens: number
   totalCost: number
   verifyAttempts: number
-  retried: boolean
+  /** 是否发生过回退重写。**可选**，可由 `verifyAttempts > 1` 现算。 */
+  retried?: boolean
   durationMs: number
 }
 
@@ -73,13 +95,27 @@ export interface DagNode {
   startedAt: string | null
   finishedAt: string | null
   verify: VerifyResult | null
+  /**
+   * 最近一条进度消息 —— **前端从 `node_status` 增量事件累积的派生字段**，
+   * 详情接口不返回它（刷新页面后会短暂为空，随后被新事件补上）。
+   *
+   * 存在的理由：一次 LLM 调用的 HTTP 重试**不递增节点 `attempt`**，
+   * 所以「正在重试 2/3」这句话是页面上唯一能把「在重试」和「卡死」区分开的信息。
+   */
+  progressMessage?: string
 }
 
-/** 补丁。`diff` 由**服务端本地生成**（java-diff-utils），不是模型拼的字符串。 */
+/**
+ * 补丁。`diff` 由**服务端本地生成**（java-diff-utils），不是模型拼的字符串。
+ *
+ * `attempt` 是产出它的 REWRITE 节点的轮次（0 起）：回退重写会给同一个文件产生多份补丁，
+ * 只按文件名分不清哪份是哪轮。标签要标「第 2 轮」就得靠它。
+ */
 export interface Patch {
   nodeId: number
   filePath: string
   diff: string
+  attempt: number
 }
 
 export interface CostSummary {
@@ -89,15 +125,41 @@ export interface CostSummary {
   totalCost: number
 }
 
+/** 计划中的一步：一个待迁移文件 + 为什么改它。 */
+export interface PlanStep {
+  filePath: string
+  rationale: string
+}
+
+/**
+ * 迁移计划（阶段 2）。
+ *
+ * `approved` 是「这份计划批过没有」的判断题，前端据此决定要不要显示批准/驳回按钮 ——
+ * 与计划本身放在一起，是因为它只对计划有意义。
+ */
+export interface PlanView {
+  summary: string
+  steps: PlanStep[]
+  approved: boolean
+}
+
 export interface TaskDetail {
   task: TaskView
   nodes: DagNode[]
   patches: Patch[]
   cost: CostSummary
+  /** 计划可为 null：未开启 PLAN 的部署（阶段 1 拓扑）本就没有计划，前端必须当成可能缺失。 */
+  plan: PlanView | null
 }
 
-/** SSE 增量事件类型。 */
-export type ProgressEventType = 'node_status' | 'task_status' | 'task_metrics'
+/**
+ * SSE 增量事件类型。
+ *
+ * `heartbeat` 是后端的**链路探活**事件（`taskId=0`，前端不渲染）：API 进程定期把它发进
+ * Pub/Sub 再自己收回，用来确认「订阅连接还活着」—— 公网链路会静默回收只读的订阅连接，
+ * 那种故障下连接看着是好的，只是永远收不到消息。收到心跳说明链路通，但它不该出现在事件流里。
+ */
+export type ProgressEventType = 'node_status' | 'task_status' | 'task_metrics' | 'heartbeat'
 
 /**
  * 增量进度事件。

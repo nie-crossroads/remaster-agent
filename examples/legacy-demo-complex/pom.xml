@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>legacy-demo-complex</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>legacy-demo-complex</name>
+    <description>
+        RemasterAgent 的「复杂版」迁移样例，比 legacy-demo 更有挑战：嵌套可变数据结构、
+        更多 JDK 8 时代写法（Date/Calendar/SimpleDateFormat、匿名 Comparator、显式装箱、
+        HashMap 手工计数、null 语义、魔法数字折扣、StringBuilder 拼装）与更多业务分支。
+        用来压测阶段 1 的 ANALYZE -&gt; REWRITE -&gt; VERIFY -&gt; 失败回退 闭环。
+    </description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!--
+          release 为什么是 21 而不是 8：沙箱用 JDK 21 构建，迁移目标也是 JDK 21。
+          本工程「遗留」之处在【源码写法】，不在编译级别。若把 release 钉在 8，
+          模型按提示词产出的 text block 会被 javac 直接拒绝 —— 那是评测环境自己的陷阱。
+
+          pom 与依赖坐标的升级（Spring Boot 2 -> 3、javax -> jakarta）属于阶段 2 的范围，
+          本工程刻意不涉及。
+        -->
+        <maven.compiler.release>21</maven.compiler.release>
+        <junit.version>5.12.2</junit.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 版本显式钉死：评测结果必须可复现 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.1</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.6</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

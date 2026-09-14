@@ -22,13 +22,18 @@ import java.util.List;
  *                           插件版本漂移会让「同一份代码两次跑出不同覆盖率」，实测过。
  * @param workspaceRoot      沙箱工作目录的根目录。每个任务一个子目录，原仓库永不被就地修改。
  * @param stopOnFirstFailure 首个 VERIFY 失败后是否直接判定任务失败（调试用，正常应为 false）
+ * @param requirePlanApproval 规划是否需要人工评审后才执行。<b>默认 false</b>：PLAN 产出计划后
+ *                            直接执行，保持阶段 1/3 的端到端行为不变。置 true 时，PLAN 成功会
+ *                            把任务挂到 {@code WAITING_HUMAN}，需人工在评审界面批准后再继续 ——
+ *                            这是阶段 2「规划结果人工评审」验收项的开关。
  */
 @ConfigurationProperties(prefix = "remaster.core")
 public record CoreProperties(
         Integer maxRewriteAttempts,
         List<String> verifyMavenGoals,
         String workspaceRoot,
-        Boolean stopOnFirstFailure
+        Boolean stopOnFirstFailure,
+        Boolean requirePlanApproval
 ) {
 
     /** JaCoCo 版本。0.8.13 支持到 Java 22，足以覆盖 JDK 21 的 class 文件版本 65。 */
@@ -46,6 +51,7 @@ public record CoreProperties(
         workspaceRoot = (workspaceRoot == null || workspaceRoot.isBlank())
                 ? ".remaster-workspaces" : workspaceRoot;
         stopOnFirstFailure = stopOnFirstFailure != null && stopOnFirstFailure;
+        requirePlanApproval = requirePlanApproval != null && requirePlanApproval;
     }
 
     /** 总轮次 = 初次 + 重试次数。 */

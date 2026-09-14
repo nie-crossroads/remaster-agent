@@ -4,21 +4,25 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * 任务详情：概要 + DAG 节点 + 补丁 + 成本。
+ * 任务详情：概要 + DAG 节点 + 补丁 + 成本 + 迁移计划。
  *
  * <p>一次返回全部，不做「点开某个 Tab 再请求一次」。理由是这个页面的用途是
- * <b>审查一次迁移到底发生了什么</b>：节点状态、失败原因、diff、花了多少钱——
- * 这几样必须放在一起看才能形成判断（比如「改了 3 轮、花了 4 次调用、最后还是编译不过」）。
- * 拆成多个请求只会增加「拼不起来」的可能，而单任务的数据量是几十 KB 级别。
+ * <b>审查一次迁移到底发生了什么</b>：节点状态、失败原因、diff、花了多少钱、打算改哪些文件——
+ * 这几样必须放在一起看才能形成判断（比如「规划说改 2 个文件、实际改了 3 轮、花了 4 次调用、
+ * 最后还是编译不过」）。拆成多个请求只会增加「拼不起来」的可能，而单任务的数据量是几十 KB 级别。
  *
  * <p>子视图嵌套在这里而不是各自独立成文件，是因为它们<b>只在这个组合里有意义</b>：
  * {@code NodeView} 脱离任务上下文没有用途，单独暴露反而容易被人误用成公共契约。
+ *
+ * <p>{@code plan} 可为 null —— 未开启 PLAN 的部署（阶段 1 拓扑）本就没有计划，
+ * 前端必须把它当成「可能没有」来处理，而不是期望一个空壳对象。
  */
 public record TaskDetailView(
         TaskView task,
         List<NodeView> nodes,
         List<PatchView> patches,
-        CostView cost
+        CostView cost,
+        PlanView plan
 ) {
 
     /**
@@ -57,11 +61,18 @@ public record TaskDetailView(
     ) {
     }
 
-    /** 一次改写产生的补丁，前端用 Monaco 渲染。 */
+    /**
+     * 一次改写产生的补丁，前端用 Monaco 渲染。
+     *
+     * @param attempt 产出它的 REWRITE 节点的轮次（0 起）。回退重写会给同一个文件产生
+     *                <b>多份</b>补丁，光看文件名分不清哪份是哪轮 —— 带轮次才能标成
+     *                「第 2 轮」，让「模型第二次改了什么」这件事在界面上看得见。
+     */
     public record PatchView(
             long nodeId,
             String filePath,
-            String diff
+            String diff,
+            int attempt
     ) {
     }
 
@@ -71,6 +82,35 @@ public record TaskDetailView(
             long promptTokens,
             long completionTokens,
             double totalCost
+    ) {
+    }
+
+    /**
+     * 迁移计划 —— 阶段 2「规划结果人工评审」要展示的东西。
+     *
+     * <p><b>为什么计划要单独作为一个视图，而不是塞进某个节点里</b>：
+     * 计划是<b>人做决策的依据</b>，而节点列表是「机器做过什么」的流水账。
+     * 评审界面要的是前者：一句话说清整体思路 + 逐个文件说明为什么改它。
+     * 把计划摊在节点流水里，人会淹在 PENDING/RUNNING 里找不到重点。
+     *
+     * <p>{@code approved} 与计划放在一起，是因为它只对计划有意义 ——
+     * 「这份计划批过没有」是一个判断题，前端据此决定要不要显示批准按钮。
+     *
+     * @param summary  一句话概述整体迁移思路
+     * @param steps    待迁移文件及理由，按建议执行顺序
+     * @param approved 是否已被人工批准（未开启评审时恒为 false，前端不看它）
+     */
+    public record PlanView(
+            String summary,
+            List<PlanStepView> steps,
+            boolean approved
+    ) {
+    }
+
+    /** 计划中的一步。 */
+    public record PlanStepView(
+            String filePath,
+            String rationale
     ) {
     }
 }

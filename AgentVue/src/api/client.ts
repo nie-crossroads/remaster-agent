@@ -39,6 +39,24 @@ export function eventsUrl(id: number): string {
 }
 
 /**
+ * 批准迁移计划 —— 后端的动作里含一次「重新入队」，任务随即从 checkpoint 续跑。
+ *
+ * 后端只接受 `WAITING_HUMAN` 状态的任务，否则返回 409。前端因此<b>不能在乐观 UI 里
+ * 自己先把状态改成 RUNNING</b>：真发生冲突时页面会显示一个后端并不认可的状态。
+ * 一律以服务端返回的 TaskView 为准。
+ */
+export async function approvePlan(id: number): Promise<TaskView> {
+  const { data } = await http.post<TaskView>(`/tasks/${id}/plan/approve`)
+  return data
+}
+
+/** 驳回迁移计划：任务直接判失败，不执行任何改写。理由可选，会写进失败原因。 */
+export async function rejectPlan(id: number, reason?: string): Promise<TaskView> {
+  const { data } = await http.post<TaskView>(`/tasks/${id}/plan/reject`, { reason })
+  return data
+}
+
+/**
  * 把任意异常翻成一句能给人看的话。
  *
  * 后端用 `{"error": "..."}` 或 ProblemDetail 返回业务错误；拿不到就退回状态码。

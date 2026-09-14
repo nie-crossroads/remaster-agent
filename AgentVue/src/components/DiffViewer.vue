@@ -40,6 +40,15 @@ let monacoRef: Monaco | null = null
 let diffEditor: import('monaco-editor').editor.IStandaloneDiffEditor | null = null
 /** 组件是否已被卸载 —— 异步加载完成后据此决定还要不要建编辑器。 */
 let disposed = false
+/**
+ * 正在进行的「加载 monaco + 创建编辑器」任务。用来防重入：onMounted 与
+ * props.patches 的 watch 可能几乎同时触发 ensureEditor，各自都会 `await import`
+ * （异步），在 diffEditor 真正被赋值前都绕过了 `if (diffEditor) return` 的闸门，
+ * 于是创建出两个 editor、继而 selectPatch 对同一 URI 重复 createModel 报
+ * "Cannot add model because it already exists!"。复用同一个 in-flight promise，
+ * 并发调用只会真正执行一次。
+ */
+let editorLoadingPromise: Promise<void> | null = null
 
 function splitDiff(diff: string): { before: string; after: string } {
   const lines = diff.split(/\r?\n/)
@@ -71,6 +80,20 @@ function disposeModels(): void {
     m.original.dispose()
     m.modified.dispose()
   }
+}
+
+/**
+ * 补丁标签文案。
+ *
+ * 回退重写会让**同一个文件**产生多份补丁（每轮一份），只按文件名会出现两个一模一样的
+ * 标签，分不清哪份是哪轮。所以同一文件出现多份时补上轮次 —— 这也正好让
+ * 「模型第二次改了什么」这件事在界面上看得见，是回退机制的价值所在。
+ * 只有一份时不加，免得给绝大多数正常任务平添噪音。
+ */
+function tabLabel(patch: Patch, index: number): string {
+  const name = patch.filePath.split('/').pop() ?? patch.filePath
+  const duplicated = props.patches.some((p, i) => i !== index && p.filePath === patch.filePath)
+  return duplicated ? `${name} · 第 ${patch.attempt + 1} 轮` : name
 }
 
 function selectPatch(idx: number): void {
@@ -115,7 +138,7 @@ async function ensureEditor(): Promise<void> {
       ignoreTrimWhitespace: false,
     })
     if (props.patches.length > 0) {
-      selectPatch(0)
+      selectPatch(selectedPatchIdx.value)
     }
   } catch (e) {
     loadError.value = e instanceof Error ? e.message : String(e)
@@ -132,10 +155,16 @@ onMounted(() => {
 
 watch(
   () => props.patches,
-  () => {
-    selectedPatchIdx.value = 0
+  (next, prev) => {
+    // 详情会在节点到达终态时被重拉（补丁随之更新），所以这个 watch 现在会被频繁触发。
+    // 不能无条件把选中项重置回第 0 份 —— 用户正看第 2 轮补丁时，一次自动刷新就把它弹走，
+    // 等于边看边被人翻页。按 nodeId 找回原来那一份；真没了（换了任务）才退回第一份。
+    const previousNodeId = prev?.[selectedPatchIdx.value]?.nodeId
+    const keptIndex =
+      previousNodeId === undefined ? -1 : next.findIndex((p) => p.nodeId === previousNodeId)
+    selectedPatchIdx.value = keptIndex >= 0 ? keptIndex : 0
     if (props.patches.length > 0) {
-      void ensureEditor().then(() => selectPatch(0))
+      void ensureEditor().then(() => selectPatch(selectedPatchIdx.value))
     }
   },
 )
@@ -146,6 +175,7 @@ onBeforeUnmount(() => {
   diffEditor?.dispose()
   diffEditor = null
   monacoRef = null
+  editorLoadingPromise = null
 })
 </script>
 
@@ -159,11 +189,11 @@ onBeforeUnmount(() => {
       <el-radio-group v-model="selectedPatchIdx" class="patch-tabs" size="small">
         <el-radio-button
           v-for="(p, i) in patches"
-          :key="i"
+          :key="p.nodeId"
           :label="i"
           @click="selectPatch(i)"
         >
-          {{ p.filePath.split('/').pop() }}
+          {{ tabLabel(p, i) }}
         </el-radio-button>
       </el-radio-group>
       <div v-if="loadError" class="error-banner">

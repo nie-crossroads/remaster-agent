@@ -202,7 +202,8 @@ class TaskConsumerTest {
 
     /** 用桩件替掉真正的调度器：只记录被调用的任务 id，行为由用例注入。 */
     private DagScheduler scheduler() {
-        CoreProperties coreProperties = new CoreProperties(2, List.of("test"), ".unused", false);
+        // 第 5 参 requirePlanApproval=false：本用例只验「消费 → 调调度器」这段，不涉及人工评审
+        CoreProperties coreProperties = new CoreProperties(2, List.of("test"), ".unused", false, false);
         return new DagScheduler(store, coreProperties, new JsonCodec(), List.of(),
                 publishers(ProgressPublisher.NOOP)) {
             @Override

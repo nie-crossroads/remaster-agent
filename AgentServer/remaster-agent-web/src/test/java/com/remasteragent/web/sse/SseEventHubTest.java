@@ -171,6 +171,73 @@ class SseEventHubTest {
     }
 
     // ------------------------------------------------------------------
+    // 最近事件缓冲（刷新页面后「最近事件流」还能有数据）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("有人观看时事件进缓冲，重连（刷新页面）时历史仍在")
+    void recentEventsSurviveReconnect() {
+        hub.open(7L);
+        publish(ProgressEvent.nodeStatus(7L, 10L, "rewrite", "RUNNING", 0, "第 1 轮"));
+        publish(ProgressEvent.nodeStatus(7L, 10L, "rewrite", "SUCCEEDED", 0, "完成"));
+
+        assertEquals(2, hub.bufferedEventCount(7L));
+
+        // 刷新页面 = 旧连接断开 + 新连接建立。缓冲不随连接消失而清空，
+        // 否则「刷新后事件流一片空白」这个缺陷就会以另一种形式回来。
+        hub.open(7L);
+
+        assertEquals(2, hub.bufferedEventCount(7L), "补发的历史必须熬过一次重连");
+    }
+
+    @Test
+    @DisplayName("无人观看的任务不占缓冲（避免「看过的每个任务」都常驻一份）")
+    void eventsWithoutViewerAreNotBuffered() {
+        publish(ProgressEvent.nodeStatus(999L, 1L, "rewrite", "RUNNING", 0, "没人看"));
+
+        assertEquals(0, hub.bufferedEventCount(999L),
+                "没人看就不该记 —— 权威状态在库里，缓冲只为「刷新后还能看到过程」而存在");
+    }
+
+    @Test
+    @DisplayName("缓冲有上限：超出后丢最旧的，不会随任务时长无限增长")
+    void recentEventsAreBounded() {
+        hub.open(7L);
+        int overflow = 60;
+        for (int i = 0; i < overflow; i++) {
+            publish(ProgressEvent.nodeStatus(7L, 10L, "rewrite", "RUNNING", i, "第 " + i + " 条"));
+        }
+
+        assertEquals(50, hub.bufferedEventCount(7L),
+                "上限必须生效：一次长任务的事件量远大于界面上能展示的条数");
+    }
+
+    @Test
+    @DisplayName("不同任务的缓冲互不干扰")
+    void buffersAreIsolatedPerTask() {
+        hub.open(1L);
+        hub.open(2L);
+        publish(ProgressEvent.nodeStatus(1L, 10L, "rewrite", "RUNNING", 0, "任务 1"));
+        publish(ProgressEvent.nodeStatus(2L, 20L, "rewrite", "RUNNING", 0, "任务 2"));
+        publish(ProgressEvent.nodeStatus(2L, 20L, "verify", "RUNNING", 0, "任务 2 又一条"));
+
+        assertEquals(1, hub.bufferedEventCount(1L));
+        assertEquals(2, hub.bufferedEventCount(2L));
+    }
+
+    @Test
+    @DisplayName("销毁时缓冲一并释放")
+    void destroyClearsBuffers() {
+        hub.open(7L);
+        publish(ProgressEvent.taskStatus(7L, "RUNNING", "进行中"));
+        assertEquals(1, hub.bufferedEventCount(7L));
+
+        hub.destroy();
+
+        assertEquals(0, hub.bufferedEventCount(7L));
+    }
+
+    // ------------------------------------------------------------------
     // 装配
     // ------------------------------------------------------------------
 
@@ -187,7 +254,8 @@ class SseEventHubTest {
                 if (missingTasks.contains(taskId)) {
                     throw new NotFoundException("任务不存在: " + taskId);
                 }
-                return new TaskDetailView(null, List.of(), List.of(), null);
+                // 末位 plan=null：本用例只验「快照先发、增量后发」的顺序，不关心计划内容
+                return new TaskDetailView(null, List.of(), List.of(), null, null);
             }
         };
     }

@@ -310,7 +310,9 @@ class DagSchedulerRollbackTest {
     private DagScheduler scheduler(InMemoryTaskStore store, NodeExecutor... executors) {
         assertTrue(executors.length >= 3, "至少需要 ANALYZE / REWRITE / VERIFY 三个执行器");
         CoreProperties properties = new CoreProperties(
-                MAX_REWRITE_ATTEMPTS, List.of("test"), workspaceRoot.toString(), false);
+                MAX_REWRITE_ATTEMPTS, List.of("test"), workspaceRoot.toString(), false,
+                // 关掉规划评审：单测聚焦回退重写，不引入挂起/批准这条额外状态路径
+                false);
         return new DagScheduler(store, properties, new JsonCodec(),
                 List.of(executors), publishers(ProgressPublisher.NOOP));
     }

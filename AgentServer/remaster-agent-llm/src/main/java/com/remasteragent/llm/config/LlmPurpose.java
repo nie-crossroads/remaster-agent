@@ -11,6 +11,8 @@ package com.remasteragent.llm.config;
 public enum LlmPurpose {
     /** 读懂代码结构。低频，可以用强模型 */
     ANALYZE,
+    /** 规划迁移范围与顺序。**极低频**（每任务一次），值得用强模型 —— 规划错了后面全错 */
+    PLAN,
     /** 代码改写。**高频**，是成本大头，适合用便宜档 */
     REWRITE,
     /** 判断失败原因是代码问题还是测试问题。中频 */

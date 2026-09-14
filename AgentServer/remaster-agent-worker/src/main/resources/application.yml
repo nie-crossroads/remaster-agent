@@ -54,6 +54,19 @@ remaster:
     # 超过 3 轮通常说明问题不在模型的随机性，而在工程本身，继续只是烧钱
     max-rewrite-attempts: 2
     workspace-root: .remaster-workspaces
+    # true = PLAN 成功后把任务挂到 WAITING_HUMAN，等人工在评审界面批准再继续。
+    # 默认 false（自动执行）—— 这是「规划人工评审」的开关，验收该能力时置 true。
+    # 注意：批准入口在 API 进程（POST /api/tasks/{id}/plan/approve），两个进程读同一个开关，
+    # 但只有 Worker 会真的去挂起，所以这个值以 Worker 的配置为准。
+    require-plan-approval: ${REMASTER_REQUIRE_PLAN_APPROVAL:false}
+
+  # 代码 RAG（阶段 2 理解层）。enabled=false 可整体关闭检索，是最省钱的降级开关。
+  rag:
+    enabled: ${REMASTER_RAG_ENABLED:true}
+    top-k: ${REMASTER_RAG_TOP_K:6}
+    candidate-k: ${REMASTER_RAG_CANDIDATE_K:20}
+    rrf-k: ${REMASTER_RAG_RRF_K:60}
+    neighbor-depth: ${REMASTER_RAG_NEIGHBOR_DEPTH:1}
 
   sandbox:
     mode: ${SANDBOX_MODE:local}
@@ -68,6 +81,32 @@ remaster:
     api-key: ${LLM_API_KEY}
     model: ${LLM_MODEL}
     rewrite-model: ${LLM_MODEL_REWRITE}
+    # 单次 HTTP 请求超时。中转网关延迟波动大（实测首连可接近 10s），太小会误杀正常请求；
+    # 但也没必要设得比网关自身的超时阈值更大 —— 上游（实测是 Cloudflare）超阈会直接回 524，
+    # 客户端等得更久也拿不到内容。默认 180s，写出来是为了让它成为一个被审视过的数字。
+    timeout-seconds: ${LLM_TIMEOUT_SECONDS:180}
+    # 失败后最多「再」试几次。注意这不是 SDK 的重试 —— SDK 内层重试已关闭（maxRetries=0），
+    # 重试统一由 LlmRetryExecutor 接管，因为只有它能把「正在重试」上报给前端。
+    # 上限 2 表示一次调用最多真正发出 3 次请求。
+    max-retries: ${LLM_MAX_RETRIES:2}
+    # 重试前的退避基准：第 n 次失败后等 base × 2^(n-1)，封顶 30s。
+    # 为什么要退避：实测连着两次撞上同一个上游拥塞（两次都是 524），
+    # 不留间隔地重试等于把同一个请求立刻再送进同一个瓶颈。
+    retry-backoff-millis: ${LLM_RETRY_BACKOFF_MILLIS:2000}
+    # 一次调用（含全部重试）的总时间预算，超出即停止重试。
+    # 它是「最坏耗时」的硬上限：没有它，上限就是「超时 × 尝试次数」这个乘积。
+    # 默认 420s 是按实测数据定的 —— 三次尝试各约 130s、加上退避接近 400s，
+    # 留一点余量才不会把「本来第三次能成功」的任务判死。
+    call-budget-seconds: ${LLM_CALL_BUDGET_SECONDS:420}
+    # 代码 RAG 的向量模型。留空 = 向量路禁用，混合检索退化为「全文 + 符号」两路。
+    # 若配置，必须产出 1024 维向量（与 code_chunk.embedding vector(1024) 对齐）。
+    embedding-model: ${LLM_EMBEDDING_MODEL:}
+    embedding-dimensions: ${LLM_EMBEDDING_DIMENSIONS:}
+    # 向量模型的专用网关与 Key。留空则复用上面的 base-url / api-key ——
+    # 但向量模型常和 chat 不在同一个网关（本项目的 chat 走中转网关，向量走云厂商 MaaS），
+    # 所以这两项通常是要填的，否则 /embeddings 会打到不提供该接口的 chat 网关上。
+    embedding-base-url: ${LLM_EMBEDDING_BASE_URL:}
+    embedding-api-key: ${LLM_EMBEDDING_API_KEY:}
     # 成本估算单价（每百万 token）。llm_call 表存的是真实 token 用量，
     # 金额由这两个单价换算 —— 所以换模型后必须同步改，否则成本指标会失真。
     # 默认 0：宁可显示「未配置」也不猜一个数，猜出来的成本比没有成本更糟。

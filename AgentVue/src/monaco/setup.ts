@@ -12,34 +12,47 @@
  *
  * 结论：谁用 Monaco，谁在组件里 import。这个文件只负责挂环境对象。
  *
- * ## 为什么用「空白 worker 占位」而不是 monaco 自带的 worker 文件
+ * ## 为什么必须是「真的」worker，不能拿空壳占位（踩过，代价很大）
  *
- * 用 Vite 打包 monaco 自带的 worker 会连环撞两个障碍：
- *  1. monaco-editor 的 package.json exports 只暴露 `*.js` 路径，而 worker 入口
- *     惯例写作 `editor.worker`（不带后缀）；
- *  2. Vite 的 worker-import-meta-url 插件会把它当相对当前文件的 URL 去解析，
- *     于是去找 `src/monaco/monaco-editor/...` 这种不存在的路径。
+ * Monaco 的 DiffEditor **不在主线程算差异**：它把 original / modified 两个 model
+ * 交给 `editorWorkerService` worker，**等 worker 回包之后**才画变更标注
+ * （`.line-insert` / `.line-delete` / 行号旁的红绿条 / 内联字符高亮）。
  *
- * 最实用的规避是「内联一个什么都不做的 worker」：monaco 拿不到有效 worker 时会
- * 自动降级到主线程做基础高亮。本项目用 DiffEditor 看代码差异，**语法高亮不是硬需求**，
- * 所以这条退路对产品效果无损。
+ * 所以「内联一个什么都不做的 worker」看起来一切正常 —— 两个 model 都渲染出来了、
+ * 控制台一条错都没有 —— 但 worker 永不回包，diff 结果永远到不了，
+ * 页面上就**只剩两栏文本、一处改动标注都没有**。这种静默失败比报错难查得多：
+ * 没有任何错误信息指向 worker，看起来像「Monaco 根本不支持 diff 标注」。
  *
- * 若以后要做语言级智能（错误标尺、跳转定义），再研究 worker 的打包方案。
+ * ## 为什么 import 说明符是 `monaco-editor/editor/editor.worker.js`
+ *
+ * monaco-editor 0.56 的 package.json exports 是：
+ *
+ * ```json
+ * { "./*.js": "./esm/vs/*.js", "./*": "./esm/vs/*.js" }
+ * ```
+ *
+ * 即 `*` 只匹配 **`esm/vs/` 之后**的那一段。所以同一个文件有两种写法、只有一种能解析：
+ *
+ * - ✅ `monaco-editor/editor/editor.worker.js` → `esm/vs/editor/editor.worker.js`
+ * - ❌ `monaco-editor/esm/vs/editor/editor.worker.js` → 前缀被拼重，`MODULE_NOT_FOUND`
+ *
+ * **别照着 node_modules 里的物理路径写 import 说明符。**
+ *
+ * `?worker` 后缀让 Vite 把它单独打成 worker chunk：主包只拿到一个瘦加载器，
+ * 真正的 worker 代码在 Monaco 第一次要 worker 时才下载 —— 首屏体积不受影响。
  */
-export function setupMonaco(): void {
-  // 内联 worker 源码 → Blob URL。比让打包器搬运 monaco 的 worker 文件可控得多。
-  const stubWorkerCode = 'self.onmessage = () => {};'
-  const stubUrl = URL.createObjectURL(
-    new Blob([stubWorkerCode], { type: 'application/javascript' }),
-  )
+import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker'
 
+export function setupMonaco(): void {
   const globalAny = self as unknown as {
     MonacoEnvironment?: { getWorker: (workerId: string, label: string) => Worker }
   }
 
   globalAny.MonacoEnvironment = {
+    // 本项目只用 Java 做差异对比，只需要基础编辑器 worker
+    // （typescript/javascript 的语言 worker 与 diff 无关，不必装配）。
     getWorker(_workerId: string, _label: string): Worker {
-      return new Worker(stubUrl)
+      return new EditorWorker()
     },
   }
 }

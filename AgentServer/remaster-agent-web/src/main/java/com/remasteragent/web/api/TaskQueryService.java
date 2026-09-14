@@ -33,7 +33,7 @@ public class TaskQueryService {
     }
 
     /**
-     * 任务详情：概要 + 节点 + 补丁 + 成本。
+     * 任务详情：概要 + 节点 + 补丁 + 成本 + 迁移计划。
      *
      * @throws NotFoundException 任务不存在
      */
@@ -44,7 +44,8 @@ public class TaskQueryService {
                 task,
                 taskStore.findNodes(taskId),
                 taskStore.findPatches(taskId),
-                taskStore.summarizeCost(taskId));
+                taskStore.summarizeCost(taskId),
+                taskStore.isPlanApproved(taskId));
     }
 
     /** 任务概要，不存在时抛 404。 */

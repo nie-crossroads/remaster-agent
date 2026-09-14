@@ -93,17 +93,7 @@ public final class JavaSourceAnalyzer {
      * @throws IllegalStateException 语法不合法时抛出，调用方据此判定产出不可信
      */
     public static ParsedHeader parseHeader(String source) {
-        ParseResult<CompilationUnit> result;
-        try {
-            result = new JavaParser(PARSER_CONFIGURATION).parse(source);
-        } catch (Exception e) {
-            throw new IllegalStateException("源码无法解析: " + e.getMessage(), e);
-        }
-
-        if (!result.isSuccessful() || result.getResult().isEmpty()) {
-            throw new IllegalStateException("源码无法解析: " + describe(result.getProblems()));
-        }
-        CompilationUnit unit = result.getResult().get();
+        CompilationUnit unit = parseOrThrow(source);
 
         String packageName = unit.getPackageDeclaration()
                 .map(declaration -> declaration.getNameAsString())
@@ -135,6 +125,27 @@ public final class JavaSourceAnalyzer {
         }
 
         return new ParsedHeader(packageName, primaryType, symbols, types.size());
+    }
+
+    /**
+     * 把源码解析成完整 AST，失败时抛 {@link IllegalStateException}。
+     *
+     * <p>对外开放这个入口，是为了让「需要完整语法树」的场景（如 AST 切块）复用同一套解析配置 ——
+     * 语言级别那个坑（见 {@link #LANGUAGE_LEVEL}）只需理解一次，不必在每个新模块里重踩一遍。
+     *
+     * <p>每次调用新建 {@link JavaParser}：它不是线程安全的，而分析可能被多 Worker 并发调用。
+     */
+    public static CompilationUnit parseOrThrow(String source) {
+        ParseResult<CompilationUnit> result;
+        try {
+            result = new JavaParser(PARSER_CONFIGURATION).parse(source);
+        } catch (Exception e) {
+            throw new IllegalStateException("源码无法解析: " + e.getMessage(), e);
+        }
+        if (!result.isSuccessful() || result.getResult().isEmpty()) {
+            throw new IllegalStateException("源码无法解析: " + describe(result.getProblems()));
+        }
+        return result.getResult().get();
     }
 
     /** 把解析问题压成一行可读文本 —— 这条消息会被拼进失败反馈喂回给模型。 */

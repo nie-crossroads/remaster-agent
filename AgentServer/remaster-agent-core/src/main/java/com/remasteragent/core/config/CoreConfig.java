@@ -1,6 +1,7 @@
 package com.remasteragent.core.config;
 
 import com.remasteragent.core.queue.QueueProperties;
+import com.remasteragent.core.rag.RagProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
@@ -13,6 +14,6 @@ import org.springframework.context.annotation.Configuration;
  * 而这个项目的卖点恰恰是「编排逻辑清晰、可单测」。
  */
 @Configuration
-@EnableConfigurationProperties({CoreProperties.class, QueueProperties.class})
+@EnableConfigurationProperties({CoreProperties.class, QueueProperties.class, RagProperties.class})
 public class CoreConfig {
 }

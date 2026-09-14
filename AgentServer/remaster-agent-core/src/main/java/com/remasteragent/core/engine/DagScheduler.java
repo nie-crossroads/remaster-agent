@@ -7,10 +7,12 @@ import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.common.domain.TaskMetrics;
+import com.remasteragent.common.domain.TaskMetricsSnapshot;
 import com.remasteragent.common.domain.TaskStatus;
 import com.remasteragent.core.codec.JsonCodec;
 import com.remasteragent.core.config.CoreProperties;
 import com.remasteragent.core.engine.node.AnalyzeNode;
+import com.remasteragent.core.engine.node.PlanNode;
 import com.remasteragent.core.engine.node.RewriteNode;
 import com.remasteragent.core.engine.node.VerifyNode;
 import com.remasteragent.core.progress.ProgressEvent;
@@ -31,6 +33,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -98,9 +101,14 @@ public class DagScheduler {
             Path workspace = restoreWorkspace(task);
             bootstrapDagIfAbsent(taskId);
 
-            // 调度主循环：每轮重新查就绪节点，因为上一轮执行可能往 DAG 里追加了新节点（回退重写）
+            // 调度主循环：每轮重新查就绪节点，因为上一轮执行可能往 DAG 里追加了新节点
+            // （回退重写的 attempt+1、规划阶段动态铺进的 REWRITE/VERIFY）
             int guard = 0;
             while (true) {
+                if (pauseForPlanReviewIfNeeded(task)) {
+                    // 挂起不是完成：直接返回，不走 finalizeTask。批准后重新入队，从 checkpoint 续跑
+                    return;
+                }
                 List<DagNode> runnable = taskStore.findRunnable(taskId);
                 if (runnable.isEmpty()) {
                     break;
@@ -131,8 +139,16 @@ public class DagScheduler {
     /**
      * 首次进入时铺出初始 DAG。
      *
-     * <p>阶段 1 是固定的线性三步；阶段 2 会由 MigrationPlanner 产出真正的 DAG 计划并批量落库。
-     * 这里的判断依据是「库里还没有节点」，所以断点续跑时不会重复铺图。
+     * <p>判断依据是「库里还没有节点」，所以断点续跑时不会重复铺图。
+     *
+     * <p><b>两种拓扑取决于 PLAN 执行器是否装配：</b>
+     * <ul>
+     *   <li>有 PLAN（阶段 2 生产形态）：只铺 ANALYZE → PLAN；真正的 REWRITE / VERIFY
+     *       由 {@link PlanNode} 在运行期按迁移计划动态插入。这就是「理解整库 → 自动规划 DAG」。</li>
+     *   <li>无 PLAN（可降级部署 / 单测桩件）：退回阶段 1 的线性三步，行为与之前完全一致。</li>
+     * </ul>
+     * <p>把拓扑选择建在「执行器是否存在」上，而不是一个开关：能力缺失时自动退化，
+     * 不需要运维记得去改配置，也不会出现「配了 PLAN 却没有实现」的悬空状态。
      */
     private void bootstrapDagIfAbsent(long taskId) {
         if (!taskStore.findNodes(taskId).isEmpty()) {
@@ -141,12 +157,18 @@ public class DagScheduler {
         }
 
         long analyzeId = taskStore.insertNode(taskId, AnalyzeNode.NODE_KEY, NodeType.ANALYZE, List.of(), 0);
+
+        if (executors.containsKey(NodeType.PLAN)) {
+            taskStore.insertNode(taskId, PlanNode.NODE_KEY, NodeType.PLAN, List.of(analyzeId), 0);
+            log.info("初始 DAG 已铺开: ANALYZE → PLAN（REWRITE/VERIFY 将由规划动态生成）");
+            return;
+        }
+
         long rewriteId = taskStore.insertNode(taskId, RewriteNode.NODE_KEY, NodeType.REWRITE,
                 List.of(analyzeId), 0);
         taskStore.insertNode(taskId, VerifyNode.NODE_KEY, NodeType.VERIFY, List.of(rewriteId), 0);
-
-        long count = taskStore.findNodes(taskId).size();
-        log.info("初始 DAG 已铺开，共 {} 个节点: ANALYZE → REWRITE → VERIFY", count);
+        log.info("初始 DAG 已铺开，共 {} 个节点: ANALYZE → REWRITE → VERIFY",
+                taskStore.findNodes(taskId).size());
     }
 
     // ------------------------------------------------------------------
@@ -225,8 +247,11 @@ public class DagScheduler {
             return;
         }
 
+        // 回退必须落在「同一个文件」上：多文件场景下，不能因为 f1 失败而去重写 f2
+        String filePath = keySuffix(failedNode.nodeKey());
+
         if (failedNode.nodeType() == NodeType.REWRITE) {
-            taskStore.findNode(task.id(), VerifyNode.NODE_KEY, failedNode.attempt())
+            taskStore.findNode(task.id(), verifyKey(filePath), failedNode.attempt())
                     .filter(verify -> verify.status() == NodeStatus.PENDING
                             || verify.status() == NodeStatus.RUNNING)
                     .ifPresent(verify -> {
@@ -235,17 +260,14 @@ public class DagScheduler {
                     });
         }
 
-        long analyzeId = taskStore.findNode(task.id(), AnalyzeNode.NODE_KEY, 0)
-                .map(DagNode::id)
-                .orElseThrow(() -> new IllegalStateException("初始 ANALYZE 节点缺失"));
-
-        long rewriteId = taskStore.insertNode(task.id(), RewriteNode.NODE_KEY, NodeType.REWRITE,
-                List.of(analyzeId), nextAttempt);
-        taskStore.insertNode(task.id(), VerifyNode.NODE_KEY, NodeType.VERIFY,
+        long baseId = baseDependencyId(task.id());
+        long rewriteId = taskStore.insertNode(task.id(), rewriteKey(filePath), NodeType.REWRITE,
+                List.of(baseId), nextAttempt);
+        taskStore.insertNode(task.id(), verifyKey(filePath), NodeType.VERIFY,
                 List.of(rewriteId), nextAttempt);
 
-        log.info("↻ 已派生第 {} 轮重写（attempt={}），失败反馈 {} 字",
-                nextAttempt + 1, nextAttempt,
+        log.info("↻ 已派生第 {} 轮重写（attempt={} 文件={}），失败反馈 {} 字",
+                nextAttempt + 1, nextAttempt, filePath == null ? "(入口文件)" : filePath,
                 outcome.error() == null ? 0 : outcome.error().length());
         publish(ProgressEvent.taskStatus(task.id(), TaskStatus.RUNNING.name(),
                 "第 " + (nextAttempt + 1) + " 轮重写已排入队列"));
@@ -261,11 +283,13 @@ public class DagScheduler {
         if (node.nodeType() != NodeType.REWRITE || node.attempt() == 0) {
             return null;
         }
+        // 取「同一文件」上一轮的信息，避免多文件下把别的文件的失败反馈喂错给这一轮
+        String filePath = keySuffix(node.nodeKey());
         int previous = node.attempt() - 1;
-        return taskStore.findNode(taskId, VerifyNode.NODE_KEY, previous)
+        return taskStore.findNode(taskId, verifyKey(filePath), previous)
                 .filter(n -> n.status() == NodeStatus.FAILED)
                 .map(DagNode::error)
-                .or(() -> taskStore.findNode(taskId, RewriteNode.NODE_KEY, previous)
+                .or(() -> taskStore.findNode(taskId, rewriteKey(filePath), previous)
                         .filter(n -> n.status() == NodeStatus.FAILED)
                         .map(DagNode::error))
                 .orElse(null);
@@ -297,25 +321,37 @@ public class DagScheduler {
         return workspace;
     }
 
+    /**
+     * 从 checkpoint 重放改写产物 —— 多文件场景下按文件逐个重放各自「最新成功」的那一版。
+     *
+     * <p>单文件时退化为原来的行为（只有一个文件，取它最新成功的改写）。
+     */
     private void replaySucceededRewrites(long taskId, Path workspace) {
-        Optional<DagNode> latest = taskStore.findLatestSucceeded(taskId, RewriteNode.NODE_KEY);
-        if (latest.isEmpty()) {
-            return;
+        Map<String, RewriteResult> latestByFile = new LinkedHashMap<>();
+        for (DagNode node : taskStore.findNodes(taskId)) {
+            if (node.nodeType() != NodeType.REWRITE || node.status() != NodeStatus.SUCCEEDED) {
+                continue;
+            }
+            RewriteResult rewrite = json.read(node.resultJson(), RewriteResult.class).orElse(null);
+            if (rewrite == null || rewrite.filePath() == null) {
+                // 读不出来就跳过：重放失败只影响「省下的那一轮模型调用」，不影响正确性
+                continue;
+            }
+            RewriteResult existing = latestByFile.get(rewrite.filePath());
+            if (existing == null || rewrite.attempt() >= existing.attempt()) {
+                latestByFile.put(rewrite.filePath(), rewrite);
+            }
         }
-        String resultJson = latest.get().resultJson();
-        RewriteResult rewrite = json.read(resultJson, RewriteResult.class).orElse(null);
-        if (rewrite == null) {
-            // 读不出来就按原始工程继续：重放失败只影响「省下的那一轮模型调用」，
-            // 不影响正确性 —— 大不了从头再改一次
-            return;
-        }
-        try {
-            Path target = workspace.resolve(rewrite.filePath()).normalize();
-            Files.writeString(target, rewrite.newContent(), StandardCharsets.UTF_8);
-            log.info("已从 checkpoint 重放改写产物: {} (attempt={})",
-                    rewrite.filePath(), rewrite.attempt());
-        } catch (IOException e) {
-            log.warn("重放改写产物失败，将按原始工程继续", e);
+
+        for (RewriteResult rewrite : latestByFile.values()) {
+            try {
+                Path target = workspace.resolve(rewrite.filePath()).normalize();
+                Files.writeString(target, rewrite.newContent(), StandardCharsets.UTF_8);
+                log.info("已从 checkpoint 重放改写产物: {} (attempt={})",
+                        rewrite.filePath(), rewrite.attempt());
+            } catch (IOException e) {
+                log.warn("重放改写产物失败，将按原始工程继续: {}", rewrite.filePath(), e);
+            }
         }
     }
 
@@ -329,15 +365,33 @@ public class DagScheduler {
         long taskId = task.id();
         List<DagNode> nodes = taskStore.findNodes(taskId);
 
-        Optional<DagNode> lastVerify = nodes.stream()
+        // 每个文件的「最新一轮 VERIFY」—— 回退会留下历史 FAILED，只有最新那轮代表现状。
+        // 键用节点键里 ':' 之后的部分（文件路径）；裸键（隐式单文件）统一归到 ""。
+        Map<String, DagNode> latestVerifyByFile = new LinkedHashMap<>();
+        for (DagNode node : nodes) {
+            if (node.nodeType() != NodeType.VERIFY) {
+                continue;
+            }
+            String fileKey = keySuffix(node.nodeKey());
+            fileKey = fileKey == null ? "" : fileKey;
+            DagNode current = latestVerifyByFile.get(fileKey);
+            if (current == null || node.attempt() > current.attempt()) {
+                latestVerifyByFile.put(fileKey, node);
+            }
+        }
+
+        // 成功 = 至少有一个 VERIFY，且每个文件的最新一轮都通过（一票否决 —— 有文件没过就是没过）
+        boolean succeeded = !latestVerifyByFile.isEmpty()
+                && latestVerifyByFile.values().stream()
+                        .allMatch(node -> node.status() == NodeStatus.SUCCEEDED);
+
+        // 指标取「最后一次铺开的 VERIFY」：它跑的是整个工程，最能代表最终态
+        DagNode representative = nodes.stream()
                 .filter(node -> node.nodeType() == NodeType.VERIFY)
-                .max(Comparator.comparingInt(DagNode::attempt));
+                .max(Comparator.comparingLong(DagNode::id))
+                .orElse(null);
 
-        boolean succeeded = lastVerify
-                .map(node -> node.status() == NodeStatus.SUCCEEDED)
-                .orElse(false);
-
-        TaskMetrics metrics = buildMetrics(task, nodes, lastVerify.orElse(null));
+        TaskMetrics metrics = buildMetrics(task, nodes, representative);
         taskStore.saveTaskMetrics(taskId, json.write(metrics));
 
         if (succeeded) {
@@ -351,13 +405,21 @@ public class DagScheduler {
                     metrics.llmCalls());
             publish(ProgressEvent.taskStatus(taskId, TaskStatus.SUCCEEDED.name(), "任务完成"));
         } else {
-            String reason = lastVerify.map(DagNode::error).orElse("没有产生 VERIFY 节点");
+            String reason = latestVerifyByFile.values().stream()
+                    .filter(node -> node.status() != NodeStatus.SUCCEEDED)
+                    .findFirst()
+                    .map(DagNode::error)
+                    .orElse("没有产生 VERIFY 节点");
             taskStore.updateTaskStatus(taskId, TaskStatus.FAILED, trim(reason, 1000));
             log.warn("任务 #{} 失败，原因: {}", taskId, trim(reason, 200));
             publish(ProgressEvent.taskStatus(taskId, TaskStatus.FAILED.name(), trim(reason, 300)));
         }
 
-        publish(ProgressEvent.taskMetrics(taskId, json.write(metrics)));
+        // 落库用存储形状（TaskMetrics），推给前端用传输形状（TaskMetricsSnapshot）。
+        // 直接用 TaskMetrics 序列化会把派生方法 compilePassRate()/testPassRate()/retried()
+        // 全丢掉（Jackson 对 record 只认组件），前端覆盖 metrics 后进度条归零、图标变 ✗ ——
+        // 而覆盖率因为恰好是组件所以照常显示，极难联想到是形状问题。详见 TaskMetricsSnapshot 注释。
+        publish(ProgressEvent.taskMetrics(taskId, json.write(TaskMetricsSnapshot.of(metrics))));
     }
 
     private TaskMetrics buildMetrics(MigrationTask task, List<DagNode> nodes, DagNode lastVerify) {
@@ -400,6 +462,63 @@ public class DagScheduler {
             // 进度推送失败绝不能影响任务执行本身 —— 它是可观测性，不是正确性
             log.warn("发布进度事件失败: {}", event.type(), e);
         }
+    }
+
+    /**
+     * 规划评审门控 —— 阶段 2「规划结果人工评审」的落点。
+     *
+     * <p>开启评审（{@code remaster.core.require-plan-approval=true}）时，PLAN 成功即把任务挂到
+     * {@code WAITING_HUMAN}，不占用 Worker；人工批准后重新入队，任务从 checkpoint 继续 ——
+     * PLAN 已成功不会重跑，直接进入它铺出的 REWRITE。默认关闭，端到端行为与阶段 1/3 一致。
+     *
+     * @return true 表示已挂起，调用方应立刻返回而<b>不</b>走 finalizeTask（挂起不是完成）
+     */
+    private boolean pauseForPlanReviewIfNeeded(MigrationTask task) {
+        if (!properties.requirePlanApproval()) {
+            return false;
+        }
+        if (taskStore.findLatestSucceeded(task.id(), PlanNode.NODE_KEY).isEmpty()) {
+            return false;
+        }
+        if (taskStore.isPlanApproved(task.id())) {
+            return false;
+        }
+        taskStore.updateTaskStatus(task.id(), TaskStatus.WAITING_HUMAN, null);
+        publish(ProgressEvent.taskStatus(task.id(), TaskStatus.WAITING_HUMAN.name(),
+                "迁移计划已生成，等待人工评审"));
+        log.info("任务 #{} 已挂起等待规划评审；批准后将从此 checkpoint 继续", task.id());
+        return true;
+    }
+
+    /** 取节点键中 ':' 之后的部分（文件路径）；裸键（隐式单文件模式）返回 null。 */
+    private static String keySuffix(String nodeKey) {
+        if (nodeKey == null) {
+            return null;
+        }
+        int colon = nodeKey.indexOf(':');
+        return (colon < 0 || colon == nodeKey.length() - 1) ? null : nodeKey.substring(colon + 1);
+    }
+
+    /** 改写节点键：有文件用带文件的键，否则退回裸键（与 bootstrap 的退化路径一致）。 */
+    private static String rewriteKey(String filePath) {
+        return filePath == null ? RewriteNode.NODE_KEY : RewriteNode.nodeKey(filePath);
+    }
+
+    private static String verifyKey(String filePath) {
+        return filePath == null ? VerifyNode.NODE_KEY : VerifyNode.nodeKey(filePath);
+    }
+
+    /**
+     * 派生节点的基准依赖：优先 PLAN（阶段 2），否则 ANALYZE。
+     *
+     * <p>二者都必然已成功，用它作依赖能保证新派生的节点立即可就绪。<b>多文件的串行执行
+     * 由调度循环「一趟一趟执行就绪节点」保证，而不靠依赖链</b> —— 依赖链在回退时会缠成死结
+     * （回退节点依赖的那个 VERIFY 恰好是失败的那个，永远等不到 SUCCEEDED）。
+     */
+    private long baseDependencyId(long taskId) {
+        return taskStore.findNode(taskId, PlanNode.NODE_KEY, 0).map(DagNode::id)
+                .or(() -> taskStore.findNode(taskId, AnalyzeNode.NODE_KEY, 0).map(DagNode::id))
+                .orElseThrow(() -> new IllegalStateException("初始 ANALYZE/PLAN 节点缺失"));
     }
 
     private static String describe(DagNode node) {

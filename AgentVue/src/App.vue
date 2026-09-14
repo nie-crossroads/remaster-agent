@@ -11,9 +11,11 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import DagGraph from '@/components/DagGraph.vue'
 import DiffViewer from '@/components/DiffViewer.vue'
 import MetricsPanel from '@/components/MetricsPanel.vue'
 import NodeTimeline from '@/components/NodeTimeline.vue'
+import PlanReview from '@/components/PlanReview.vue'
 import TaskForm from '@/components/TaskForm.vue'
 import TaskList from '@/components/TaskList.vue'
 import { useTasksStore } from '@/stores/tasks'
@@ -21,11 +23,22 @@ import {
   TASK_STATUS_LABEL,
   TASK_STATUS_TAG,
   formatDuration,
+  formatRound,
 } from '@/utils/status'
 
 const tasks = useTasksStore()
 
+/**
+ * 实时链路指示灯。
+ *
+ * **「已连接」不等于「还有数据」**：后端的进度要经 Worker → Redis Pub/Sub → API → SSE 四段接力，
+ * 中间那段静默失效时 EventSource 连接依旧完好。所以这里优先报「还有没有实时事件」，
+ * 而不是只报 TCP 连接状态 —— 一个永远显示绿色的灯比没有灯更误导人。
+ */
 const sseLabel = computed(() => {
+  if (tasks.pollingFallback) {
+    return '暂无实时事件，已启用轮询兜底'
+  }
   switch (tasks.sseState) {
     case 'open':
       return '实时链路正常'
@@ -39,6 +52,12 @@ const sseLabel = computed(() => {
       return '未订阅'
   }
 })
+
+const sseHint = computed(() =>
+  tasks.pollingFallback
+    ? '已经有一段时间没收到实时进度事件（大模型调用期间属于正常），页面改为定时拉取最新状态。任务本身不受影响，事件恢复后会自动切回实时推送。'
+    : '实时进度由 SSE 推送；若长时间没有事件，页面会自动改为轮询兜底。',
+)
 
 const detail = computed(() => tasks.currentDetail)
 const lastTaskHeaderLabel = computed(() => {
@@ -104,8 +123,8 @@ onUnmounted(() => {
     <header class="app-header">
       <h1>RemasterAgent · 遗留代码现代化工作台</h1>
       <div class="header-meta">
-        <span>
-          <span class="sse-state-dot" :class="tasks.sseState" />
+        <span :title="sseHint">
+          <span class="sse-state-dot" :class="tasks.pollingFallback ? 'polling' : tasks.sseState" />
           {{ sseLabel }}
         </span>
         <span v-if="detail?.task" class="current">
@@ -139,6 +158,24 @@ onUnmounted(() => {
             <MetricsPanel :metrics="detail.task.metrics" />
           </div>
 
+          <!--
+            规划评审放在指标之后、执行图之前：
+            「要你做的事」优先于「看进度」。等待评审时这个卡片的边框会变成警示色，
+            视线自然先落到它上面。
+          -->
+          <PlanReview
+            :plan="detail.plan"
+            :status="detail.task.status"
+            :busy="tasks.reviewing"
+            :error="tasks.reviewError"
+            @approve="tasks.approveCurrentPlan()"
+            @reject="(reason) => tasks.rejectCurrentPlan(reason)"
+          />
+
+          <div class="card">
+            <DagGraph :nodes="detail.nodes" />
+          </div>
+
           <div class="card">
             <NodeTimeline :nodes="detail.nodes" />
           </div>
@@ -159,7 +196,7 @@ onUnmounted(() => {
                 <el-tag size="small" :type="ev.type === 'task_metrics' ? 'primary' : 'info'">
                   {{ ev.type }}
                 </el-tag>
-                <span v-if="ev.nodeKey" class="event-node">{{ ev.nodeKey }}#{{ ev.attempt }}</span>
+                <span v-if="ev.nodeKey" class="event-node">{{ ev.nodeKey }} · {{ formatRound(ev.attempt) }}</span>
                 <span v-if="ev.status" class="event-status">{{ ev.status }}</span>
                 <span v-if="ev.message" class="event-msg">{{ ev.message.slice(0, 80) }}</span>
               </div>
@@ -180,7 +217,7 @@ onUnmounted(() => {
         <div v-else class="card">
           <div class="empty-state">
             <p>👈 从左侧列表选一个任务，或在右上表单新建</p>
-            <p class="hint">SUBMITTED → ANALYZE → REWRITE → VERIFY 全流程会在右栏实时滚动</p>
+            <p class="hint">ANALYZE → PLAN → 按文件 REWRITE → VERIFY 的全流程会在右栏实时滚动</p>
           </div>
         </div>
       </main>

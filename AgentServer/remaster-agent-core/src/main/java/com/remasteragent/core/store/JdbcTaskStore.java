@@ -125,6 +125,24 @@ public class JdbcTaskStore implements TaskStore {
     }
 
     // ------------------------------------------------------------------
+    // 规划评审（阶段 2）
+    // ------------------------------------------------------------------
+
+    @Override
+    public void approvePlan(long taskId) {
+        jdbc.update("""
+                UPDATE migration_task SET plan_approved = TRUE, updated_at = now() WHERE id = ?
+                """, taskId);
+    }
+
+    @Override
+    public boolean isPlanApproved(long taskId) {
+        Boolean approved = jdbc.queryForObject(
+                "SELECT plan_approved FROM migration_task WHERE id = ?", Boolean.class, taskId);
+        return approved != null && approved;
+    }
+
+    // ------------------------------------------------------------------
     // 节点
     // ------------------------------------------------------------------
 

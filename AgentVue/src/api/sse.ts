@@ -16,11 +16,26 @@ import type { ProgressEvent, TaskDetail } from './types'
  * SSE 是「连接建立后才开始收」。而这个任务可能已经在跑了 —— 此时快照（数据库当前状态）
  * 是**唯一**能让界面立刻正确的东西，增量只负责后续变化。丢增量只损失实时性，
  * 丢快照则会让人以为任务卡在最初状态。
+ *
+ * ## 为什么还有第三个事件（history）
+ *
+ * 快照还原的是「状态」，还原不了「过程」：「刚才发生了什么」不属于任何一张表。
+ * 所以后端为每个任务在内存里留了一份最近事件的缓冲，连接建立时紧跟着快照补发一帧
+ * `history`。没有它，刷新一次页面「最近事件流」就永远是空的 —— 而用户恰恰是靠那段
+ * 滚动日志判断「它在动，还是在重试」的。
+ *
+ * 三帧的到达顺序由服务端保证：snapshot → history → 之后才是 progress。
  */
 
 export interface TaskEventHandler {
   /** 连接建立时后端推的完整状态快照（TaskDetail 结构）。 */
   onSnapshot: (detail: TaskDetail) => void
+  /**
+   * 连接建立时后端补发的最近事件（新 → 旧，最多 50 条）。
+   *
+   * 可选：它只是锦上添花，收不到照样能用（快照 + 增量已经保证了正确性）。
+   */
+  onHistory?: (events: ProgressEvent[]) => void
   /** 增量进度事件。 */
   onProgress: (event: ProgressEvent) => void
   /** 连接建立/断开/出错，用于在界面上体现「实时链路是否健康」。 */
@@ -52,6 +67,13 @@ export function openTaskEvents(taskId: number, handler: TaskEventHandler): () =>
     const detail = parseOrNull<TaskDetail>((event as MessageEvent).data)
     if (detail) {
       handler.onSnapshot(detail)
+    }
+  })
+
+  source.addEventListener('history', (event) => {
+    const events = parseOrNull<ProgressEvent[]>((event as MessageEvent).data)
+    if (events) {
+      handler.onHistory?.(events)
     }
   })
 

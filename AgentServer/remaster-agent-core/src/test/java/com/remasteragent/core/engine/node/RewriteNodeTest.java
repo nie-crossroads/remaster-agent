@@ -8,8 +8,11 @@ import com.remasteragent.common.domain.DagNode;
 import com.remasteragent.common.domain.LlmCallRecord;
 import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeType;
+import com.remasteragent.common.rag.CodeChunk;
+import com.remasteragent.common.rag.RetrievedChunk;
 import com.remasteragent.core.engine.NodeContext;
 import com.remasteragent.core.engine.NodeOutcome;
+import com.remasteragent.core.rag.ContextRetriever;
 import com.remasteragent.core.store.InMemoryTaskStore;
 import com.remasteragent.llm.config.LlmProperties;
 import com.remasteragent.llm.rewrite.CodeRewriter;
@@ -24,6 +27,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -178,6 +182,27 @@ class RewriteNodeTest {
     }
 
     @Test
+    @DisplayName("模型原样返回源文件（+0/-0）：判失败，而不是假装成功 —— 否则白烧一轮且失败原因指向不了真因")
+    void identicalContentFailsInsteadOfPretendingSuccess() {
+        CapturingRewriter rewriter = new CapturingRewriter(proposal(ENTRY, LEGACY_SOURCE), null);
+
+        NodeOutcome outcome = execute(rewriter, 0, null);
+
+        assertFalse(outcome.success(),
+                "内容与原文件完全相同时必须判失败：交给 VERIFY 兜底只会拿到「编译失败」这种不指向真因的原因");
+        assertTrue(outcome.error().contains("+0/-0"),
+                "失败原因要说清是「没有产生差异」: " + outcome.error());
+
+        // 不写盘、不留空补丁 —— 否则审计里会多出一条没有内容的记录，前端还会给它一个「第 N 轮」标签
+        assertEquals(LEGACY_SOURCE, read(workspace.resolve(ENTRY)));
+        assertEquals(0, store.findPatches(taskId).size(), "空补丁不该入库");
+
+        // 与护栏同理：调用确实发生了，成本不能因为「没改出东西」就抹掉
+        assertEquals(1, store.findLlmCalls(taskId).size(),
+                "钱花在了一次没有产出的调用上，报表必须如实反映");
+    }
+
+    @Test
     @DisplayName("模型回复无法解析：判为可重试失败，不记成本（拿不到用量）")
     void unparseableResponseIsRetryableFailure() {
         CapturingRewriter rewriter = new CapturingRewriter(null,
@@ -201,7 +226,8 @@ class RewriteNodeTest {
 
         MigrationTask task = emptyStore.findTask(lonelyTask).orElseThrow();
         DagNode node = emptyStore.findNode(lonelyTask, RewriteNode.NODE_KEY, 0).orElseThrow();
-        RewriteNode executor = new RewriteNode(emptyStore, rewriter, llmProperties(), new JsonCodec());
+        RewriteNode executor = new RewriteNode(emptyStore, rewriter, llmProperties(), new JsonCodec(),
+                ContextRetriever.NONE);
         NodeOutcome outcome = executor.execute(new NodeContext(task, node, workspace, null));
 
         assertFalse(outcome.success());
@@ -226,21 +252,82 @@ class RewriteNodeTest {
         assertEquals("Demo", command.className());
     }
 
+    @Test
+    @DisplayName("检索上下文随命令下发；目标文件自己的块被剔除（否则同一段代码进 prompt 两遍）")
+    void retrievalContextIsForwardedAndSelfIsExcluded() {
+        CodeChunk self = new CodeChunk(ENTRY, "com.example.Demo", CodeChunk.KIND_CLASS,
+                1, 8, MODERN_SOURCE);
+        CodeChunk caller = new CodeChunk("src/main/java/com/example/App.java",
+                "com.example.App#main", CodeChunk.KIND_METHOD, 5, 9, "Demo d = new Demo();");
+        CodeChunk clock = new CodeChunk("src/main/java/com/example/Clock.java",
+                "com.example.Clock#now", CodeChunk.KIND_METHOD, 3, 5, "return Instant.now();");
+
+        List<String> queries = new ArrayList<>();
+        ContextRetriever stub = (root, query) -> {
+            queries.add(query);
+            return List.of(
+                    new RetrievedChunk(self, 1, List.of(RetrievedChunk.SOURCE_SYMBOL)),
+                    new RetrievedChunk(caller, 2, List.of(RetrievedChunk.SOURCE_SYMBOL)),
+                    new RetrievedChunk(clock, 3, List.of(RetrievedChunk.SOURCE_KEYWORD)));
+        };
+
+        CapturingRewriter rewriter = new CapturingRewriter(proposal(ENTRY, MODERN_SOURCE), null);
+        NodeOutcome outcome = execute(rewriter, 0, null, stub);
+
+        assertTrue(outcome.success(), outcome.error());
+
+        RewriteCommand command = rewriter.lastCommand;
+        assertNotNull(command);
+        assertEquals(2, command.contextChunks().size(), "目标文件自身的块必须被剔除");
+        assertTrue(command.contextChunks().stream()
+                        .noneMatch(hit -> ENTRY.equals(hit.chunk().filePath())),
+                "自己不该作为「相关代码」再出现一次");
+        assertEquals("src/main/java/com/example/App.java",
+                command.contextChunks().get(0).chunk().filePath(), "融合排名前的块应先保留");
+
+        // 查询串用全限定名而不是文件路径：路径片段（src/main/java）只会带来无差别命中
+        assertEquals(List.of("com.example.Demo"), queries);
+    }
+
+    @Test
+    @DisplayName("检索抛异常时降级为空上下文且改写照常成功 —— 检索是增强，不是单点")
+    void retrievalFailureDegradesGracefully() {
+        ContextRetriever broken = (root, query) -> {
+            throw new IllegalStateException("数据库连不上");
+        };
+
+        CapturingRewriter rewriter = new CapturingRewriter(proposal(ENTRY, MODERN_SOURCE), null);
+        NodeOutcome outcome = execute(rewriter, 0, null, broken);
+
+        assertTrue(outcome.success(), "检索挂掉不该让改写失败: " + outcome.error());
+        assertTrue(rewriter.lastCommand.contextChunks().isEmpty());
+        assertEquals(MODERN_SOURCE, read(workspace.resolve(ENTRY)));
+    }
+
     // ------------------------------------------------------------------
     // 装配
     // ------------------------------------------------------------------
 
     private NodeOutcome execute(CapturingRewriter rewriter, int attempt, String retryFeedback) {
+        return execute(rewriter, attempt, retryFeedback, ContextRetriever.NONE);
+    }
+
+    private NodeOutcome execute(CapturingRewriter rewriter, int attempt, String retryFeedback,
+                                ContextRetriever retriever) {
         store.insertNode(taskId, RewriteNode.NODE_KEY, NodeType.REWRITE, List.of(), attempt);
-        RewriteNode node = new RewriteNode(store, rewriter, llmProperties(), new JsonCodec());
+        RewriteNode node = new RewriteNode(store, rewriter, llmProperties(), new JsonCodec(), retriever);
         MigrationTask task = store.findTask(taskId).orElseThrow();
         DagNode dagNode = store.findNode(taskId, RewriteNode.NODE_KEY, attempt).orElseThrow();
         return node.execute(new NodeContext(task, dagNode, workspace, retryFeedback));
     }
 
     private static LlmProperties llmProperties() {
+        // 参数顺序：baseUrl, apiKey, model, rewriteModel, embeddingModel, embeddingDimensions,
+        //          embeddingBaseUrl, embeddingApiKey, timeoutSeconds, maxRetries,
+        //          retryBackoffMillis, callBudgetSeconds, inPrice, outPrice, logRequests
+        // 重试相关两项填 0：单测用桩件替掉了模型，重试语义由 LlmRetryExecutorTest 单独钉。
         return new LlmProperties("http://stub/v1", "stub-key", "stub-model", null,
-                60, 0, 1.0d, 2.0d, false);
+                null, null, null, null, 60, 0, 0, 0, 1.0d, 2.0d, false);
     }
 
     private static RewriteProposal proposal(String filePath, String newContent) {

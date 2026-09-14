@@ -36,6 +36,17 @@ public class VerifyNode implements NodeExecutor {
 
     public static final String NODE_KEY = "verify";
 
+    /**
+     * 某个文件的验证节点键：{@code verify:<相对路径>}，与 {@link RewriteNode#nodeKey(String)} 对称。
+     *
+     * <p>验证本身跑的是整个工程（{@code mvn test}），并不针对单个文件；键里带文件是为了让
+     * 调度器能定位「这个 VERIFY 属于哪个文件的第几轮」，从而在回退时精确匹配 ——
+     * 多文件场景下这是区分并存的多条改验证链的唯一依据。
+     */
+    public static String nodeKey(String filePath) {
+        return NODE_KEY + ":" + filePath;
+    }
+
     /** 单次沙箱执行的内存上限，从沙箱配置透传。 */
     private static final int MEMORY_LIMIT_MB = 1024;
 

@@ -28,7 +28,7 @@ import java.util.function.Consumer;
  * 所以真正的初始化推迟到第一个 {@link #subscribe} 调用。
  */
 @Component
-public class RedisProgressEventSubscriber implements ProgressEventSubscriber, DisposableBean {
+public class RedisProgressEventSubscriber implements ProgressEventSubscriber, ProgressLink, DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(RedisProgressEventSubscriber.class);
 
@@ -41,6 +41,12 @@ public class RedisProgressEventSubscriber implements ProgressEventSubscriber, Di
 
     private volatile RedisMessageListenerContainer container;
 
+    /** 当前这条订阅的建立时刻；0 表示从未订阅过。用于判断「链路有多久没有确认过还活着」。 */
+    private volatile long subscribedAt;
+
+    /** 最后一条从频道上收到的消息时刻（任何消息都算，包括心跳与解析不了的载荷）。 */
+    private volatile long lastMessageAt;
+
     public RedisProgressEventSubscriber(RedisConnectionFactory connectionFactory, JsonCodec json) {
         this.connectionFactory = connectionFactory;
         this.json = json;
@@ -48,8 +54,21 @@ public class RedisProgressEventSubscriber implements ProgressEventSubscriber, Di
 
     @Override
     public AutoCloseable subscribe(Consumer<ProgressEvent> listener) {
-        listeners.add(listener);
+        AutoCloseable registration = register(listener);
         ensureContainer();
+        return registration;
+    }
+
+    /**
+     * 登记一个订阅者 —— 与「建立 Redis 连接」刻意分开。
+     *
+     * <p>两件事本来就不同：一个是「谁想收事件」，一个是「链路建起来没有」。
+     * 分开之后，派发语义（心跳不派发、坏载荷不派发、正常事件派发给所有人）
+     * 就能在<b>完全不连 Redis</b> 的情况下被确定性验证 —— 而这正是这条链路最需要被测的部分，
+     * 因为它在生产里出问题时一声不响。
+     */
+    AutoCloseable register(Consumer<ProgressEvent> listener) {
+        listeners.add(listener);
         return () -> listeners.remove(listener);
     }
 
@@ -68,16 +87,36 @@ public class RedisProgressEventSubscriber implements ProgressEventSubscriber, Di
             created.afterPropertiesSet();
             created.start();
             this.container = created;
+            // 两条时间戳都在这里重置：新订阅刚建立时链路是「尚未确认」而不是「已确认」，
+            // 把 subscribedAt 作为兜底信号，可以避免刚重建完就被看门狗立刻判死（15 秒内必有心跳回来）。
+            this.subscribedAt = System.currentTimeMillis();
+            this.lastMessageAt = 0L;
             log.info("已订阅进度事件频道 {}", ProgressChannels.PROGRESS_EVENTS);
         }
     }
 
-    private void onMessage(Message message, byte[] pattern) {
-        // 解析不出来只丢弃这一条：进度是加速器，不是事实来源。
-        // 让一条坏消息把订阅线程搞挂，代价远大于丢一条通知。
+    /**
+     * 收到频道消息。
+     *
+     * <p><b>顺序很重要</b>：先把「收到过东西」这件事记下来，再谈内容是否解析得动。
+     * 链路的死活由「有没有流量」决定，而不是由「这条消息合不合法」决定 ——
+     * 一条解析不了的脏载荷同样证明连接是通的，把它当成链路已死而重建，纯属自找抖动。
+     *
+     * <p>包级可见而不是 private：单测要直接投递一条消息来验证「心跳不派发、正常事件才派发」，
+     * 而那条路径完全不需要真的连 Redis。
+     */
+    void onMessage(Message message, byte[] pattern) {
+        lastMessageAt = System.currentTimeMillis();
+
         ProgressEvent event = json.read(message.getBody(), ProgressEvent.class).orElse(null);
         if (event == null) {
-            log.warn("无法解析进度事件，已丢弃");
+            log.warn("无法解析进度事件，已丢弃（但链路仍视为存活）");
+            return;
+        }
+
+        // 心跳只用来确认这条订阅链路还活着（见 ProgressEvent.TYPE_HEARTBEAT），
+        // 必须在派发之前拦掉：它不是任务进度，漏给 SSE 前端会在事件流里多出一条无意义的记录。
+        if (event.isHeartbeat()) {
             return;
         }
 
@@ -92,11 +131,49 @@ public class RedisProgressEventSubscriber implements ProgressEventSubscriber, Di
     }
 
     @Override
+    public long lastSignalAt() {
+        return Math.max(subscribedAt, lastMessageAt);
+    }
+
+    @Override
+    public boolean isConfirmedAlive() {
+        // 重建订阅时会把 lastMessageAt 清零，所以「还没收到过消息」天然判为未确认 ——
+        // 重建只是把链路重新接上，接上之后通不通要等下一条消息说了算。
+        return subscribedAt > 0L && lastMessageAt >= subscribedAt;
+    }
+
+    /**
+     * 拆掉当前订阅并重建 —— 从「连接已死但没人知道」里恢复的唯一手段。
+     *
+     * <p>{@code listeners} 是刻意保留的：它装的是「谁想收事件」，与「这条订阅还活着吗」无关。
+     * 重建订阅不该让上层重新注册一遍回调。
+     */
+    @Override
+    public synchronized void recreateSubscription() {
+        RedisMessageListenerContainer current = container;
+        if (current == null) {
+            // 从未订阅过就没什么可重建的；硬建一条反而是凭空多出一个连接
+            return;
+        }
+        container = null;
+        try {
+            current.destroy();
+        } catch (Exception e) {
+            // 旧容器销毁失败不影响新容器建立：它已经是个死连接了，能扔多远扔多远
+            log.warn("销毁失效的进度订阅容器时出错，继续重建", e);
+        }
+        ensureContainer();
+    }
+
+    @Override
     public void destroy() {
         RedisMessageListenerContainer current = container;
         if (current == null) {
             return;
         }
+        container = null;
+        subscribedAt = 0L;
+        lastMessageAt = 0L;
         try {
             current.destroy();
         } catch (Exception e) {

@@ -108,6 +108,17 @@ body {
   background: var(--color-danger);
 }
 
+/*
+ * 实时事件静默、改为轮询兜底。
+ * 用信息色而不是警示色：这不是故障 —— 页面上的数据仍然是最新的，只是不再「实时」。
+ * 而它在一次正常的大模型调用期间必然出现（那几十秒本来就没有事件），
+ * 用黄色/红色会让每次改写都看着像出事。
+ */
+.sse-state-dot.polling {
+  background: var(--el-color-primary);
+  box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.18);
+}
+
 .section-title {
   font-size: 13px;
   font-weight: 600;

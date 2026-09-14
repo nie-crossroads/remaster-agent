@@ -40,6 +40,7 @@ public final class InMemoryTaskStore implements TaskStore {
     private final Map<Long, String> metrics = new LinkedHashMap<>();
     private final List<PatchRecord> patches = new ArrayList<>();
     private final List<LlmCallRecord> llmCalls = new ArrayList<>();
+    private final Set<Long> approvedPlans = new java.util.LinkedHashSet<>();
 
     private long taskSeq = 0;
     private long nodeSeq = 0;
@@ -95,6 +96,20 @@ public final class InMemoryTaskStore implements TaskStore {
                 .sorted(Comparator.comparing(MigrationTask::id).reversed())
                 .limit(limit)
                 .toList();
+    }
+
+    // ------------------------------------------------------------------
+    // 规划评审（阶段 2）
+    // ------------------------------------------------------------------
+
+    @Override
+    public void approvePlan(long taskId) {
+        approvedPlans.add(taskId);
+    }
+
+    @Override
+    public boolean isPlanApproved(long taskId) {
+        return approvedPlans.contains(taskId);
     }
 
     // ------------------------------------------------------------------

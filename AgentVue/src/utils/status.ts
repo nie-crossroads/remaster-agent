@@ -71,9 +71,23 @@ export function formatDuration(ms: number | null | undefined): string {
   if (ms < 0) return '-'
   if (ms < 1_000) return `${ms} ms`
   if (ms < 60_000) return `${(ms / 1_000).toFixed(1)} s`
-  const minutes = Math.floor(ms / 60_000)
-  const seconds = Math.round((ms % 60_000) / 1_000)
-  return `${minutes}m ${seconds}s`
+  // 先把总毫秒一次性折算成整秒再拆分，避免「分取整 + 秒四舍五入」各自为政：
+  // 59.9 秒会被四舍五入成 60，于是出现「36m 60s」这种不存在的写法（实测见到过）。
+  const totalSeconds = Math.round(ms / 1_000)
+  return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`
+}
+
+/**
+ * 把后端的 `attempt` 渲染成「第 N 轮」。
+ *
+ * **后端是 0 基下标**：首次执行 `attempt=0`，回退一次变 1、再回退变 2。
+ * 界面上直接显示 `attempt 0` 会让人以为是「失败了 0 次」或者「还没开始」，
+ * 而它其实就是「第一轮」—— 所以统一在这里 +1 并换成人话，三处调用点共用同一个函数，
+ * 避免节点时间线说「第 2 轮」而事件流说「#1」这种自相矛盾。
+ */
+export function formatRound(attempt: number | null | undefined): string {
+  if (attempt == null || attempt < 0) return '第 ? 轮'
+  return `第 ${attempt + 1} 轮`
 }
 
 /** 把 -1 表示的「未采集」覆盖率变成显眼的「—」，避免与 0% 混淆。 */

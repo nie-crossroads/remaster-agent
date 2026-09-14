@@ -1,8 +1,10 @@
 package com.remasteragent.web.api;
 
+import com.remasteragent.common.agent.PlanResult;
 import com.remasteragent.common.agent.VerifyResult;
 import com.remasteragent.common.domain.DagNode;
 import com.remasteragent.common.domain.MigrationTask;
+import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.common.domain.PatchRecord;
 import com.remasteragent.common.domain.TaskMetrics;
@@ -12,7 +14,9 @@ import com.remasteragent.web.api.dto.TaskDetailView;
 import com.remasteragent.web.api.dto.TaskView;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 领域模型 → 对外视图的转换。
@@ -54,16 +58,57 @@ public class TaskViewMapper {
     }
 
     public TaskDetailView toDetail(MigrationTask task, List<DagNode> nodes,
-                                   List<PatchRecord> patches, TaskStore.CostSummary cost) {
+                                   List<PatchRecord> patches, TaskStore.CostSummary cost,
+                                   boolean planApproved) {
+        // 补丁表里只有 node_id，轮次在节点上。回退重写会让同一个文件产生多份补丁，
+        // 只靠文件名分不出先后 —— 在这里就把轮次并进补丁视图，前端不必再去 join 节点。
+        Map<Long, Integer> attemptByNodeId = new HashMap<>();
+        for (DagNode node : nodes) {
+            attemptByNodeId.put(node.id(), node.attempt());
+        }
         return new TaskDetailView(
                 toView(task),
                 nodes.stream().map(this::toNode).toList(),
                 patches.stream()
                         .map(patch -> new TaskDetailView.PatchView(
-                                patch.nodeId(), patch.filePath(), patch.diff()))
+                                patch.nodeId(), patch.filePath(), patch.diff(),
+                                attemptByNodeId.getOrDefault(patch.nodeId(), 0)))
                         .toList(),
                 new TaskDetailView.CostView(
-                        cost.calls(), cost.promptTokens(), cost.completionTokens(), cost.totalCost()));
+                        cost.calls(), cost.promptTokens(), cost.completionTokens(), cost.totalCost()),
+                toPlan(nodes, planApproved));
+    }
+
+    /**
+     * 从节点流水中捞出 PLAN 节点的产出，摊成评审界面要的形状。
+     *
+     * <p>取<b>最新一个成功</b>的 PLAN 节点，而不是「第一个」或「最后一个」：
+     * 任务可能因为 Worker 重启而重跑 PLAN（成功后仍重入队），此时最新那份才是当前生效的计划。
+     * 解析失败返回 null —— 指标 JSON 是历史数据，格式可能已随版本变化，
+     * 为了「一条老任务的计划读不出来」而让整个详情接口 500，得不偿失（同本类顶部的约定）。
+     */
+    private TaskDetailView.PlanView toPlan(List<DagNode> nodes, boolean approved) {
+        DagNode latest = null;
+        for (DagNode node : nodes) {
+            if (node.nodeType() != NodeType.PLAN || node.status() != NodeStatus.SUCCEEDED) {
+                continue;
+            }
+            if (latest == null || node.id() > latest.id()) {
+                latest = node;
+            }
+        }
+        if (latest == null) {
+            return null;
+        }
+        PlanResult plan = read(latest.resultJson(), PlanResult.class);
+        if (plan == null) {
+            return null;
+        }
+        List<TaskDetailView.PlanStepView> steps = plan.steps() == null ? List.of()
+                : plan.steps().stream()
+                .map(step -> new TaskDetailView.PlanStepView(step.filePath(), step.rationale()))
+                .toList();
+        return new TaskDetailView.PlanView(plan.summary(), steps, approved);
     }
 
     private TaskDetailView.NodeView toNode(DagNode node) {

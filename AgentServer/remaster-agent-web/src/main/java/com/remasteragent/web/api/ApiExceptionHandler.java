@@ -3,6 +3,7 @@ package com.remasteragent.web.api;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -38,6 +39,25 @@ public class ApiExceptionHandler {
         return new ApiError(e.getMessage(), Instant.now());
     }
 
+    /** 状态冲突（如对已批准的任务再批准一次）—— 409 而不是 400，语义不同，见 ConflictException。 */
+    @ExceptionHandler(ConflictException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public ApiError handleConflict(ConflictException e) {
+        return new ApiError(e.getMessage(), Instant.now());
+    }
+
+    /**
+     * 下游依赖（队列）暂时不可用 —— 503。
+     *
+     * <p>用 503 而不是 500，是因为它带着一个明确的承诺：<b>这是暂时性的，稍后重发即可</b>。
+     * 500 会让调用方以为是自己请求写错了或服务端有 bug，从而去改一个本来没错的请求。
+     */
+    @ExceptionHandler(QueueUnavailableException.class)
+    @ResponseStatus(HttpStatus.SERVICE_UNAVAILABLE)
+    public ApiError handleQueueUnavailable(QueueUnavailableException e) {
+        return new ApiError(e.getMessage(), Instant.now());
+    }
+
     @ExceptionHandler({IllegalArgumentException.class, IllegalStateException.class})
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiError handleBadRequest(RuntimeException e) {
@@ -52,6 +72,22 @@ public class ApiExceptionHandler {
                 .map(ApiExceptionHandler::describe)
                 .collect(Collectors.joining("；"));
         return new ApiError(detail.isBlank() ? "请求参数不合法" : detail, Instant.now());
+    }
+
+    /**
+     * 请求体读不出来（JSON 语法错、编码不是 UTF-8 等）—— 这是<b>调用方的问题</b>，必须是 400。
+     *
+     * <p>单独处理它的理由：不加这条时它会落到下面的兜底分支，以 500 返回。调用方看到 500
+     * 会去查服务端日志找自己的 bug，而真实原因只是「body 少了个引号」或「终端把中文编成了 GBK」——
+     * 排查方向从一开始就是错的。
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ApiError handleUnreadableBody(HttpMessageNotReadableException e) {
+        String reason = e.getMostSpecificCause() == null ? "" : e.getMostSpecificCause().getMessage();
+        log.warn("请求体无法解析: {}", reason);
+        return new ApiError("请求体无法解析（请确认是合法 JSON 且以 UTF-8 编码）: " + reason,
+                Instant.now());
     }
 
     @ExceptionHandler(Exception.class)
