@@ -2,6 +2,7 @@ package com.remasteragent.core.rag;
 
 import com.remasteragent.common.rag.CodeChunk;
 import com.remasteragent.llm.embedding.EmbeddingProvider;
+import com.remasteragent.tools.ast.CallEdgeExtractor;
 import com.remasteragent.tools.ast.CodeChunker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,7 +14,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 代码索引器 —— 把整个工程切成块、算好向量、写进 {@code repo}/{@code code_chunk}。
@@ -73,7 +76,7 @@ public class CodeIndexer {
 
         Collected collected = collectChunks(root);
         List<float[]> vectors = embedAll(collected.chunks());
-        store.insertChunks(repoId, collected.chunks(), vectors);
+        store.insertChunks(repoId, collected.chunks(), vectors, collected.callsList());
 
         boolean vectorized = vectors != null;
         log.info("代码索引完成: repo={} 名称={} 文件={} 块={} 向量={}",
@@ -90,26 +93,35 @@ public class CodeIndexer {
         try {
             javaFiles = SourceFiles.listJavaFiles(root, MAX_FILES);
         } catch (IOException e) {
-            throw new IllegalStateException("遍历工程失败: " + root + " —— " + e.getMessage(), e);
+            throw new IllegalStateException("遍历工程失败: " + root + " " + e.getMessage(), e);
         }
         if (javaFiles.size() >= MAX_FILES) {
             log.warn("源码文件数达到上限 {}，其余文件本次未索引（工程根: {}）", MAX_FILES, root);
         }
 
         List<CodeChunk> chunks = new ArrayList<>();
+        Map<String, List<String>> allCalls = new LinkedHashMap<>();
         int files = 0;
         for (Path file : javaFiles) {
             files++;
             String relative = SourceFiles.relativePath(root, file);
             try {
                 String source = Files.readString(file, StandardCharsets.UTF_8);
-                chunks.addAll(CodeChunker.chunk(relative, source));
+                List<CodeChunk> fileChunks = CodeChunker.chunk(relative, source);
+                chunks.addAll(fileChunks);
+                // 依赖边与块对齐：键是方法块符号（如 com.foo.Foo#bar），类块不在键里
+                allCalls.putAll(CallEdgeExtractor.extract(relative, source));
             } catch (Exception e) {
                 // 一个坏文件不该让整次索引失败：跳过并留痕，继续处理其余文件
                 log.warn("跳过无法切块的文件 {}: {}", relative, e.getMessage());
             }
         }
-        return new Collected(chunks, files);
+        List<List<String>> callsList = new ArrayList<>();
+        for (CodeChunk chunk : chunks) {
+            String key = chunk.symbol();
+            callsList.add(key == null ? List.of() : allCalls.getOrDefault(key, List.of()));
+        }
+        return new Collected(chunks, files, callsList);
     }
 
     // ------------------------------------------------------------------
@@ -142,6 +154,6 @@ public class CodeIndexer {
         }
     }
 
-    private record Collected(List<CodeChunk> chunks, int files) {
+    private record Collected(List<CodeChunk> chunks, int files, List<List<String>> callsList) {
     }
 }

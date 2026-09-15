@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 混合检索 —— 代码 RAG 的查询入口。
@@ -212,6 +213,9 @@ public class HybridRetriever implements ContextRetriever {
         if (properties.neighborDepth() > 0) {
             addStructuralNeighbors(repoId, selected, byKey);
         }
+        if (properties.neighborDepth() > 1) {
+            addDependencyNeighbors(repoId, selected, byKey);
+        }
 
         List<RetrievedChunk> result = new ArrayList<>(selected.size());
         int rank = 1;
@@ -270,6 +274,62 @@ public class HybridRetriever implements ContextRetriever {
             byKey.putIfAbsent(key, chunk);
             selected.put(key, List.of(RetrievedChunk.SOURCE_NEIGHBOR));
         }
+    }
+
+    /**
+     * 跨文件依赖图多跳扩展：在「方法 → 所属类」（depth=1）之上，再按调用边跨文件扩展。
+     *
+     * <p>种子是已选中集合里的所有<b>方法块</b>符号；用 {@link DependencyExpander} 做 BFS，
+     * 每跳通过存储层把名字级候选（如 {@code OrderService}）后缀匹配到全限定符号
+     * （{@code com.foo.OrderService}），把「被调用目标的跨文件实现」带进上下文。</p>
+     */
+    private void addDependencyNeighbors(long repoId, Map<String, List<String>> selected,
+                                         Map<String, CodeChunk> byKey) {
+        Set<String> methodSeeds = selected.keySet().stream()
+                .map(byKey::get)
+                .filter(chunk -> chunk != null && CodeChunk.KIND_METHOD.equals(chunk.kind()))
+                .map(HybridRetriever::keyOf)
+                .collect(Collectors.toSet());
+        if (methodSeeds.isEmpty()) {
+            return;
+        }
+        int extraDepth = properties.neighborDepth() - 1;
+        Set<String> expanded = DependencyExpander.expand(methodSeeds, extraDepth,
+                front -> lookupCallees(repoId, front));
+        if (expanded.isEmpty()) {
+            return;
+        }
+        // 控制邻居总量，避免上下文被无关同名类型稀释：额外邻居不超过 topK
+        List<String> toFetch = expanded.stream()
+                .filter(key -> !selected.containsKey(key))
+                .limit(properties.topK())
+                .toList();
+        if (toFetch.isEmpty()) {
+            return;
+        }
+        try {
+            List<CodeChunk> chunks = store.findChunksBySymbols(repoId, toFetch);
+            for (CodeChunk chunk : chunks) {
+                String key = keyOf(chunk);
+                if (selected.containsKey(key)) {
+                    continue;
+                }
+                byKey.putIfAbsent(key, chunk);
+                selected.put(key, List.of(RetrievedChunk.SOURCE_NEIGHBOR));
+            }
+        } catch (Exception e) {
+            log.warn("依赖图邻居扩展查询失败，跳过: {}", e.getMessage());
+        }
+    }
+
+    /** 给定一组全限定符号，返回它们的被调用目标（全限定）：先取名字级候选，再后缀匹配落点。 */
+    private Set<String> lookupCallees(long repoId, Set<String> front) {
+        List<String> candidates = store.findCallTargets(repoId, new ArrayList<>(front));
+        if (candidates.isEmpty()) {
+            return Set.of();
+        }
+        List<CodeChunk> chunks = store.findChunksBySymbolSuffixes(repoId, candidates);
+        return chunks.stream().map(HybridRetriever::keyOf).collect(Collectors.toSet());
     }
 
     /** 求一个块所属的类型符号：方法块取 {@code #} 之前，类型块取自己，其余返回 null。 */

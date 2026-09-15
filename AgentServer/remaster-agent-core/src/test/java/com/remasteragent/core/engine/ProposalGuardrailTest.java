@@ -4,6 +4,8 @@ import com.remasteragent.common.agent.RewriteProposal;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -150,5 +152,104 @@ class ProposalGuardrailTest {
     void blankExpectedTypeIsNotChecked() {
         assertTrue(ProposalGuardrail.check("com.example", "",
                 new RewriteProposal("package-info.java", "package com.example;\n", "r")).passed());
+    }
+
+    private static final String SOURCE_WITH_PUBLIC_MEMBERS = """
+            package com.example;
+
+            public class Demo {
+                public static final int version = 1;
+                public String hi() {
+                    return "hi";
+                }
+                private String secret() {
+                    return "x";
+                }
+            }
+            """;
+
+    @Test
+    @DisplayName("公开方法被改写删除：拒绝，且原因列出被删成员")
+    void removedPublicMethodRejected() {
+        String after = """
+                package com.example;
+
+                public class Demo {
+                    public static final int version = 1;
+                }
+                """;
+        List<String> expected = List.of("com.example.Demo#hi()", "com.example.Demo#version");
+        ProposalGuardrail.GuardrailResult result = ProposalGuardrail.check(
+                "com.example", "Demo", expected,
+                new RewriteProposal("src/Demo.java", after, "顺手删了个没用的方法"));
+
+        assertFalse(result.passed(), "删 public 方法会让调用方/测试编译失败，必须拦下");
+        assertTrue(result.reason().contains("Demo#hi()"), "原因要列出被删成员: " + result.reason());
+    }
+
+    @Test
+    @DisplayName("公开字段被改写删除：拒绝")
+    void removedPublicFieldRejected() {
+        String after = """
+                package com.example;
+
+                public class Demo {
+                    public String hi() {
+                        return "hi";
+                    }
+                }
+                """;
+        List<String> expected = List.of("com.example.Demo#hi()", "com.example.Demo#version");
+        ProposalGuardrail.GuardrailResult result = ProposalGuardrail.check(
+                "com.example", "Demo", expected,
+                new RewriteProposal("src/Demo.java", after, "r"));
+
+        assertFalse(result.passed());
+        assertTrue(result.reason().contains("Demo#version"), "原因要列出被删的公开字段: " + result.reason());
+    }
+
+    @Test
+    @DisplayName("只删 private 成员：放行（private 不影响外部调用方）")
+    void removedPrivateMemberOk() {
+        String after = """
+                package com.example;
+
+                public class Demo {
+                    public static final int version = 1;
+                    public String hi() {
+                        return "hi";
+                    }
+                }
+                """;
+        List<String> expected = List.of("com.example.Demo#hi()", "com.example.Demo#version");
+        assertTrue(ProposalGuardrail.check("com.example", "Demo", expected,
+                new RewriteProposal("src/Demo.java", after, "r")).passed(),
+                "删除 private 成员不该被判违规");
+    }
+
+    @Test
+    @DisplayName("公开成员全部保留（仅改实现）：放行")
+    void publicMembersPreservedOk() {
+        String after = """
+                package com.example;
+
+                public class Demo {
+                    public static final int version = 2;
+                    public String hi() {
+                        return "hello".formatted();
+                    }
+                }
+                """;
+        List<String> expected = List.of("com.example.Demo#hi()", "com.example.Demo#version");
+        assertTrue(ProposalGuardrail.check("com.example", "Demo", expected,
+                new RewriteProposal("src/Demo.java", after, "r")).passed());
+    }
+
+    @Test
+    @DisplayName("未提供公开成员快照（空列表）：不校验，放行")
+    void emptyExpectedMembersSkipsCheck() {
+        String after = "package com.example;\n\npublic class Demo {\n}\n";
+        assertTrue(ProposalGuardrail.check("com.example", "Demo", List.of(),
+                new RewriteProposal("src/Demo.java", after, "r")).passed());
     }
 }

@@ -9,6 +9,7 @@ import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.Modifier;
 import com.github.javaparser.ast.body.TypeDeclaration;
 import com.remasteragent.common.agent.AnalyzeResult;
 
@@ -125,6 +126,54 @@ public final class JavaSourceAnalyzer {
         }
 
         return new ParsedHeader(packageName, primaryType, symbols, types.size());
+    }
+
+    /**
+     * 抽取源文件中所有 public 成员的签名快照。
+     *
+     * <p>形如 {@code com.foo.OrderService#getStatus()}、{@code com.foo.OrderService#amount}。
+     * 这是「公开 API 契约」——迁移场景里目标文件的 public 成员不该被改写删除，
+     * 否则调用方或测试会编译失败（见 {@link com.remasteragent.core.engine.ProposalGuardrail}）。
+     *
+     * <p>只计 public 的<b>方法</b>与<b>字段</b>；private / protected / 包级不计入，
+     * 因为它们不影响外部调用方。嵌套类型递归处理，但只取 public 的。</p>
+     *
+     * @throws IllegalStateException 源码无法解析时（与 {@link #parseHeader} 同前提）
+     */
+    public static List<String> publicMembers(String source) {
+        CompilationUnit unit = parseOrThrow(source);
+        String packageName = unit.getPackageDeclaration()
+                .map(declaration -> declaration.getNameAsString())
+                .orElse("");
+        List<String> members = new ArrayList<>();
+        for (TypeDeclaration<?> type : unit.getTypes()) {
+            collectPublicMembers(type, qualifiedOf(packageName, type.getNameAsString()), members);
+        }
+        return members;
+    }
+
+    private static void collectPublicMembers(TypeDeclaration<?> type, String qualified, List<String> out) {
+        for (MethodDeclaration method : type.getMethods()) {
+            if (method.getModifiers().contains(Modifier.publicModifier())) {
+                out.add(qualified + "#" + method.getNameAsString() + "()");
+            }
+        }
+        for (FieldDeclaration field : type.getFields()) {
+            if (field.getModifiers().contains(Modifier.publicModifier())) {
+                field.getVariables().forEach(v -> out.add(qualified + "#" + v.getNameAsString()));
+            }
+        }
+        for (TypeDeclaration<?> nested : type.findAll(TypeDeclaration.class)) {
+            if (nested != type && nested.getModifiers().contains(Modifier.publicModifier())) {
+                String nestedQualified = qualified + "$" + nested.getNameAsString();
+                out.add(nestedQualified);
+                collectPublicMembers(nested, nestedQualified, out);
+            }
+        }
+    }
+
+    private static String qualifiedOf(String packageName, String simpleName) {
+        return packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
     }
 
     /**

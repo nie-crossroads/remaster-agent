@@ -3,6 +3,10 @@ package com.remasteragent.core.engine;
 import com.remasteragent.common.agent.RewriteProposal;
 import com.remasteragent.tools.ast.JavaSourceAnalyzer;
 
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
 /**
  * 产出校验 —— 决定「模型交回来的东西算不算数」。
  *
@@ -57,8 +61,28 @@ public final class ProposalGuardrail {
      * @param expectedType    改写前的主类型名；为空表示源文件里没有顶层类型，此时不校验类型名
      * @param proposal        模型产出
      */
+    /**
+     * 校验（不含公开成员约束的兼容入口）。
+     *
+     * @see #check(String, String, List, RewriteProposal)
+     */
     public static GuardrailResult check(String expectedPackage,
                                         String expectedType,
+                                        RewriteProposal proposal) {
+        return check(expectedPackage, expectedType, List.of(), proposal);
+    }
+
+    /**
+     * 校验 —— 在原有「非空 / 可解析 / 主类型名不变 / 包名不变」四判据之外，
+     * 增加「公开 API 不可被删」的判据。
+     *
+     * @param expectedPublicMembers 改写前目标文件的 public 成员签名快照
+     *                              （由 {@link JavaSourceAnalyzer#publicMembers} 抽取）；
+     *                              为空表示不校验公开 API
+     */
+    public static GuardrailResult check(String expectedPackage,
+                                        String expectedType,
+                                        List<String> expectedPublicMembers,
                                         RewriteProposal proposal) {
         if (proposal == null) {
             return GuardrailResult.violation("产出为空");
@@ -90,6 +114,44 @@ public final class ProposalGuardrail {
                             .formatted(expectedPackage, header.packageName().isEmpty() ? "(空)" : header.packageName()));
         }
 
+        GuardrailResult publicApi = checkPublicMembers(expectedPublicMembers, proposal);
+        if (!publicApi.passed()) {
+            return publicApi;
+        }
+
+        return GuardrailResult.ok();
+    }
+
+    /**
+     * 公开 API 契约判据：改写后必须仍保留改写前的每一个 public 成员签名。
+     *
+     * <p>模型偶尔会「顺手」删掉它以为没用的 public 方法/字段，但迁移场景下这些公开成员
+     * 很可能是调用方或测试的依赖 —— 删掉会让下游编译失败，且这种失败要到沙箱里才暴露，
+     * 反馈不指向真因。在本地毫秒级预筛拦掉，比白跑一次沙箱便宜得多。</p>
+     *
+     * <p>只比对「签名是否存在」，不比对实现：模型合法地改方法体是允许的，只要公开契约不变。</p>
+     */
+    private static GuardrailResult checkPublicMembers(List<String> expected, RewriteProposal proposal) {
+        if (expected == null || expected.isEmpty()) {
+            return GuardrailResult.ok();
+        }
+        List<String> removed;
+        try {
+            List<String> after = JavaSourceAnalyzer.publicMembers(proposal.newContent());
+            Set<String> afterSet = new LinkedHashSet<>(after);
+            removed = expected.stream()
+                    .filter(member -> !afterSet.contains(member))
+                    .toList();
+        } catch (Exception e) {
+            // 解析失败已由前面的判据拦截，这里理论上不会触发；兜底放过，不重复报解析错误
+            return GuardrailResult.ok();
+        }
+        if (!removed.isEmpty()) {
+            return GuardrailResult.violation(
+                    "改写删除了公开成员（公开 API 是被调用方/测试依赖的契约，不允许删除或改签名）："
+                            + String.join("、", removed)
+                            + "。请保留这些公开成员的签名、仅调整其实现；若确需移除，请同时更新其调用方。");
+        }
         return GuardrailResult.ok();
     }
 }

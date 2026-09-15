@@ -85,7 +85,8 @@ public class CodeIndexStore {
      * @param chunks     分块列表
      * @param embeddings 与 chunks 一一对应的向量；为 {@code null} 时全部写 NULL
      */
-    public void insertChunks(long repoId, List<CodeChunk> chunks, List<float[]> embeddings) {
+    public void insertChunks(long repoId, List<CodeChunk> chunks, List<float[]> embeddings,
+                              List<List<String>> callsList) {
         if (chunks == null || chunks.isEmpty()) {
             return;
         }
@@ -93,11 +94,17 @@ public class CodeIndexStore {
             throw new IllegalArgumentException(
                     "向量数与分块数不一致: " + embeddings.size() + " vs " + chunks.size());
         }
+        if (callsList != null && callsList.size() != chunks.size()) {
+            throw new IllegalArgumentException(
+                    "调用边数与分块数不一致: " + callsList.size() + " vs " + chunks.size());
+        }
+        // callsList 为 null 时（调用方没抽依赖边，如历史索引路径），每块写空数组 '{}'
+        final List<List<String>> safeCalls = callsList == null ? List.of() : callsList;
 
         jdbc.batchUpdate("""
                 INSERT INTO code_chunk
-                    (repo_id, file_path, symbol, kind, start_line, end_line, content, embedding)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CAST(? AS vector))
+                    (repo_id, file_path, symbol, kind, start_line, end_line, content, embedding, calls)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CAST(? AS vector), CAST(? AS text[]))
                 """, new BatchPreparedStatementSetter() {
             @Override
             public void setValues(PreparedStatement ps, int i) throws SQLException {
@@ -111,6 +118,8 @@ public class CodeIndexStore {
                 ps.setString(7, chunk.content());
                 float[] vector = embeddings == null ? null : embeddings.get(i);
                 ps.setString(8, vector == null ? null : toVectorLiteral(vector));
+                List<String> calls = safeCalls.isEmpty() ? List.of() : safeCalls.get(i);
+                ps.setString(9, toTextArrayLiteral(calls));
             }
 
             @Override
@@ -202,6 +211,69 @@ public class CodeIndexStore {
                  WHERE repo_id = ?
                    AND symbol = ANY (CAST(? AS text[]))
                 """, CHUNK_MAPPER, repoId, toTextArrayLiteral(cleaned));
+    }
+
+    /**
+     * 依赖图邻居扩展专用：给定一批符号，返回它们各自「调用了谁」的候选（名字级）。
+     *
+     * <p>取的是 {@code calls} 列里存的名字级候选（如 {@code OrderService}、{@code OrderService#getStatus}），
+     * 不是精确全限定符号 —— 跨文件落点由 {@link #findChunksBySymbolSuffixes} 的后缀匹配完成。
+     * {@code calls} 为 NULL 的行自动跳过（历史索引或类块无调用边）。</p>
+     */
+    public List<String> findCallTargets(long repoId, List<String> symbols) {
+        if (symbols == null || symbols.isEmpty()) {
+            return List.of();
+        }
+        List<String> cleaned = symbols.stream()
+                .filter(s -> s != null && !s.isBlank())
+                .distinct()
+                .toList();
+        if (cleaned.isEmpty()) {
+            return List.of();
+        }
+        List<String> result = jdbc.queryForList(
+                "SELECT DISTINCT unnest(calls) AS t FROM code_chunk "
+                        + "WHERE repo_id = ? AND symbol = ANY (CAST(? AS text[])) AND calls IS NOT NULL",
+                String.class, repoId, toTextArrayLiteral(cleaned));
+        return result.stream()
+                .filter(s -> s != null && !s.isBlank())
+                .toList();
+    }
+
+    /**
+     * 依赖图邻居扩展专用：按符号<b>后缀</b>匹配取回 chunk。
+     *
+     * <p>因为 {@code calls} 存的是名字级候选（简单名 / 简单名#方法），而索引里的符号是全限定的
+     * （{@code com.foo.OrderService}），精确匹配会落空。这里用 {@code symbol LIKE '%' || candidate}
+     * 把同名类型跨文件带进来 —— 这是名字级依赖图「跨文件」的关键一步。
+     * 特殊字符 {@code %} / {@code _} / {@code \} 已转义，避免被当成通配符。</p>
+     */
+    public List<CodeChunk> findChunksBySymbolSuffixes(long repoId, List<String> suffixes) {
+        if (suffixes == null || suffixes.isEmpty()) {
+            return List.of();
+        }
+        List<String> cleaned = suffixes.stream()
+                .filter(s -> s != null && !s.isBlank())
+                .distinct()
+                .toList();
+        if (cleaned.isEmpty()) {
+            return List.of();
+        }
+        StringBuilder sql = new StringBuilder(
+                "SELECT file_path, symbol, kind, start_line, end_line, content FROM code_chunk WHERE repo_id = ?");
+        List<Object> args = new ArrayList<>();
+        args.add(repoId);
+        for (int i = 0; i < cleaned.size(); i++) {
+            sql.append(i == 0 ? " AND (" : " OR ");
+            sql.append("symbol LIKE ? ESCAPE '\\'");
+            String escaped = cleaned.get(i)
+                    .replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_");
+            args.add("%" + escaped);
+        }
+        sql.append(") LIMIT 200");
+        return jdbc.query(sql.toString(), CHUNK_MAPPER, args.toArray());
     }
 
     // ------------------------------------------------------------------

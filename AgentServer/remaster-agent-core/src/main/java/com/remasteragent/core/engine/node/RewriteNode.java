@@ -193,9 +193,11 @@ public class RewriteNode implements NodeExecutor {
         recordLlmCall(context, outcome);
 
         RewriteProposal proposal = outcome.proposal();
-        // 护栏判据来自目标文件自身（包名/主类型不可被改坏），而不是别的文件
+        // 护栏判据来自目标文件自身（包名/主类型不可被改坏），而不是别的文件。
+        // 公开成员快照也来自改写前的 source：模型若删掉 public 方法/字段，会破坏调用方/测试。
+        List<String> publicMembers = JavaSourceAnalyzer.publicMembers(source);
         ProposalGuardrail.GuardrailResult guardrail = ProposalGuardrail.check(
-                header.packageName(), header.primaryType(), proposal);
+                header.packageName(), header.primaryType(), publicMembers, proposal);
         if (!guardrail.passed()) {
             log.warn("产出未通过校验: {}", guardrail.reason());
             return NodeOutcome.fail("产出未通过校验：" + guardrail.reason());
