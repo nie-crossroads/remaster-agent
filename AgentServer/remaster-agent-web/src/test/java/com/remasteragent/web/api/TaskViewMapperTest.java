@@ -8,10 +8,12 @@ import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.common.domain.PatchRecord;
+import com.remasteragent.common.domain.TaskMetrics;
 import com.remasteragent.common.domain.TaskStatus;
 import com.remasteragent.core.codec.JsonCodec;
 import com.remasteragent.core.store.TaskStore;
 import com.remasteragent.web.api.dto.TaskDetailView;
+import com.remasteragent.web.api.dto.TaskView;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -42,7 +44,7 @@ class TaskViewMapperTest {
 
         TaskDetailView detail = mapper.toDetail(
                 task(), List.of(planNode(1L, NodeStatus.SUCCEEDED, plan)), List.of(),
-                TaskStore.CostSummary.empty(), false, null);
+                TaskStore.CostSummary.empty(), false, null, null);
 
         assertTrue(detail.plan() != null);
         assertEquals("把遗留的订单统计模块迁到 java.time", detail.plan().summary());
@@ -63,7 +65,7 @@ class TaskViewMapperTest {
 
         TaskDetailView detail = mapper.toDetail(
                 task(), List.of(planNode(1L, NodeStatus.SUCCEEDED, plan)), List.of(),
-                TaskStore.CostSummary.empty(), true, null);
+                TaskStore.CostSummary.empty(), true, null, null);
 
         assertTrue(detail.plan() != null);
         assertTrue(detail.plan().approved());
@@ -83,7 +85,7 @@ class TaskViewMapperTest {
                 planNode(3L, NodeStatus.SUCCEEDED, newPlan));
 
         TaskDetailView detail = mapper.toDetail(task(), nodes, List.of(),
-                TaskStore.CostSummary.empty(), false, null);
+                TaskStore.CostSummary.empty(), false, null, null);
 
         assertTrue(detail.plan() != null);
         assertEquals("新计划", detail.plan().summary(),
@@ -99,7 +101,7 @@ class TaskViewMapperTest {
                         NodeStatus.SUCCEEDED, 0, null, null, Instant.now(), Instant.now()));
 
         TaskDetailView detail = mapper.toDetail(task(), nodes, List.of(),
-                TaskStore.CostSummary.empty(), false, null);
+                TaskStore.CostSummary.empty(), false, null, null);
 
         assertNull(detail.plan());
     }
@@ -110,7 +112,7 @@ class TaskViewMapperTest {
                 NodeStatus.SUCCEEDED, 0, "{ 这不是 JSON", null, Instant.now(), Instant.now());
 
         TaskDetailView detail = mapper.toDetail(task(), List.of(broken), List.of(),
-                TaskStore.CostSummary.empty(), false, null);
+                TaskStore.CostSummary.empty(), false, null, null);
 
         // 详情接口仍应正常返回，只是计划区域没东西 —— 历史任务的旧格式不该让整页打不开
         assertNull(detail.plan());
@@ -128,7 +130,7 @@ class TaskViewMapperTest {
                 rewriteNode(12L, 1));
 
         TaskDetailView detail = mapper.toDetail(task(), nodes,
-                List.of(patch(11L), patch(12L)), TaskStore.CostSummary.empty(), false, null);
+                List.of(patch(11L), patch(12L)), TaskStore.CostSummary.empty(), false, null, null);
 
         assertEquals(2, detail.patches().size());
         assertEquals(0, detail.patches().get(0).attempt());
@@ -142,7 +144,7 @@ class TaskViewMapperTest {
         // 补丁与节点是同一事务写进去的，正常不会缺；但历史数据可能缺。
         // 降级为 0 而不是抛异常：为一个标签显示「第 1 轮」而让整页打不开，代价不对等。
         TaskDetailView detail = mapper.toDetail(task(), List.of(), List.of(patch(99L)),
-                TaskStore.CostSummary.empty(), false, null);
+                TaskStore.CostSummary.empty(), false, null, null);
 
         assertEquals(1, detail.patches().size());
         assertEquals(0, detail.patches().get(0).attempt());
@@ -161,7 +163,7 @@ class TaskViewMapperTest {
                 Instant.now(), null);
 
         TaskDetailView detail = mapper.toDetail(task(), List.of(gateNode), List.of(),
-                TaskStore.CostSummary.empty(), false, gate);
+                TaskStore.CostSummary.empty(), false, gate, null);
 
         assertTrue(detail.gate() != null);
         assertEquals(5L, detail.gate().id());
@@ -175,13 +177,46 @@ class TaskViewMapperTest {
     @Test
     void 没有等待中的门禁时门禁字段为空() {
         TaskDetailView detail = mapper.toDetail(task(), List.of(), List.of(),
-                TaskStore.CostSummary.empty(), false, null);
+                TaskStore.CostSummary.empty(), false, null, null);
 
         // 前端据此不渲染评审卡片 —— 空壳对象会让它以为有一道待办
         assertNull(detail.gate());
     }
 
     // ------------------------------------------------------------------
+
+    @Test
+    void 累计运行时长与端到端耗时并列给出而不是合并() {
+        // 任务 #10 的真实形状：建单 → 取消 → 2.5 小时后重跑。端到端 2h33m，机器只跑了 78 秒。
+        // 两个数都得给：只留一个时，读者无从知道它答的是「机器干了多久」还是「你等了多久」。
+        long wallMs = 9_227_957L;
+        long runMs = 77_882L;
+
+        TaskView view = mapper.toView(taskWithMetrics(wallMs), runMs);
+
+        assertEquals(wallMs, view.metrics().durationMs());
+        assertEquals(Long.valueOf(runMs), view.runDurationMs());
+    }
+
+    @Test
+    void 没有链路数据时累计运行时长是null而不是0() {
+        // 埋点是阶段 3 才接上的，此前的任务一条 span 都没有。把「查不到」当成 0，
+        // 界面就会理直气壮地写出「运行 0 秒（端到端 1 秒）」—— 那是编造，不是估算。
+        TaskView view = mapper.toView(taskWithMetrics(1_000L), null);
+
+        assertNull(view.runDurationMs());
+        assertEquals(1_000L, view.metrics().durationMs(), "端到端仍是存储里的那个值");
+    }
+
+    // ------------------------------------------------------------------
+
+    private static MigrationTask taskWithMetrics(long durationMs) {
+        TaskMetrics metrics = new TaskMetrics(1, 1, 15, 15, 1.0d, 2, 3_283L, 2_996L, 0.015267d, 1,
+                durationMs);
+        Instant now = Instant.now();
+        return new MigrationTask(7L, "E:/demo", "src/main/java/Demo.java", 21,
+                TaskStatus.SUCCEEDED, new JsonCodec().write(metrics), null, false, now, now);
+    }
 
     private static DagNode rewriteNode(Long id, int attempt) {
         return new DagNode(id, 7L, "rewrite:src/main/java/Demo.java", NodeType.REWRITE, List.of(1L),
@@ -201,6 +236,6 @@ class TaskViewMapperTest {
     private static MigrationTask task() {
         Instant now = Instant.now();
         return new MigrationTask(7L, "E:/demo", "src/main/java/Demo.java", 21,
-                TaskStatus.SUCCEEDED, null, null, now, now);
+                TaskStatus.SUCCEEDED, null, null, false, now, now);
     }
 }

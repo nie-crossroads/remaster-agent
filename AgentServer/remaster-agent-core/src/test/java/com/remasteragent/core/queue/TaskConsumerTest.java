@@ -7,6 +7,7 @@ import com.remasteragent.common.domain.TaskStatus;
 import com.remasteragent.core.codec.JsonCodec;
 import com.remasteragent.core.config.CoreProperties;
 import com.remasteragent.core.engine.DagScheduler;
+import com.remasteragent.core.gate.GateTimeoutSweeper;
 import com.remasteragent.core.progress.ProgressPublisher;
 import com.remasteragent.core.store.InMemoryTaskStore;
 import com.remasteragent.core.workspace.WorkspaceCleaner;
@@ -27,6 +28,7 @@ import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -52,6 +54,9 @@ class TaskConsumerTest {
     private InMemoryTaskQueue queue;
     private final List<Long> runInvocations = new ArrayList<>();
 
+    /** 每次 runTask 被调用时收到的 traceparent，由桩件记录。 */
+    private final List<String> runTraceparents = new ArrayList<>();
+
     /** 每次 runTask 被调用时执行的行为，由各用例替换。 */
     private Consumer<Long> onRun = taskId -> {
     };
@@ -61,8 +66,34 @@ class TaskConsumerTest {
         store = new InMemoryTaskStore();
         queue = new InMemoryTaskQueue();
         runInvocations.clear();
+        runTraceparents.clear();
         onRun = taskId -> {
         };
+    }
+
+    @Test
+    @DisplayName("队列消息里的 traceparent 必须原样交给调度器 —— 跨进程链路全靠它")
+    void traceparentFromMessageReachesScheduler() {
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        String traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        queue.enqueue(taskId, traceparent);
+
+        consumer().processOnce();
+
+        assertEquals(List.of(traceparent), runTraceparents,
+                "丢了它，Worker 侧会自起一条孤立 trace，API 那一段在链路里直接消失（且不报错）");
+    }
+
+    @Test
+    @DisplayName("没有 traceparent 时传 null —— 自起一条 trace，不影响任务执行")
+    void missingTraceparentIsPassedThroughAsNull() {
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        queue.enqueue(taskId);
+
+        consumer().processOnce();
+
+        assertEquals(1, runTraceparents.size());
+        assertNull(runTraceparents.get(0), "追踪断了不该让任务跑不动");
     }
 
     @Test
@@ -163,8 +194,8 @@ class TaskConsumerTest {
     }
 
     @Test
-    @DisplayName("启动时会初始化队列并重置残留的 RUNNING 节点；关闭后线程退出")
-    void startInitializesQueueAndResetsStaleNodes() {
+    @DisplayName("启动只初始化队列 —— 残留 RUNNING 节点不再在启动时被全局重置")
+    void startOnlyInitializesQueue() {
         long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
         long nodeId = store.insertNode(taskId, "rewrite", NodeType.REWRITE, List.of(), 0);
         store.markNodeRunning(nodeId);
@@ -174,8 +205,10 @@ class TaskConsumerTest {
         try {
             assertTrue(queue.isInitialized(), "启动时必须建好消费组，否则消息会读不到");
             DagNode node = store.findNode(taskId, "rewrite", 0).orElseThrow();
-            assertEquals(NodeStatus.PENDING, node.status(),
-                    "上次进程被杀留下的 RUNNING 节点必须重置，否则永远等不到调度");
+            assertEquals(NodeStatus.RUNNING, node.status(),
+                    "启动时的重置必须是【不做】的：全局扫全表会在多 Worker 并存时"
+                            + "把别的 Worker 正在跑的节点一起清掉。重置已改到 DagScheduler.runTask "
+                            + "入口、并且按任务做（见 DagSchedulerTest 对应用例）");
         } finally {
             consumer.close();
         }
@@ -213,7 +246,8 @@ class TaskConsumerTest {
         WorkspaceCleaner expired = new WorkspaceCleaner(sandboxRoot, Duration.ofHours(24), true,
                 Duration.ofMinutes(30), store, Clock.offset(Clock.systemUTC(), Duration.ofHours(25)));
 
-        new TaskConsumer(queue, store, scheduler(), queueProperties(), expired).processOnce();
+        new TaskConsumer(queue, store, scheduler(), queueProperties(), expired, gateSweeperDisabled())
+                .processOnce();
 
         assertFalse(Files.exists(sandbox), "过期沙箱应被永久删除（不进回收站）");
     }
@@ -223,7 +257,8 @@ class TaskConsumerTest {
     // ------------------------------------------------------------------
 
     private TaskConsumer consumer() {
-        return new TaskConsumer(queue, store, scheduler(), queueProperties(), cleanupDisabled());
+        return new TaskConsumer(queue, store, scheduler(), queueProperties(),
+                cleanupDisabled(), gateSweeperDisabled());
     }
 
     /**
@@ -236,17 +271,32 @@ class TaskConsumerTest {
                 Duration.ofMinutes(30), store, Clock.systemUTC());
     }
 
+    /**
+     * 门禁超时器同样是关掉的（{@code timeout = 0} 即「永不超时」）：
+     * 它默认就不该生效，判据由 {@code GateTimeoutSweeperTest} 覆盖。
+     */
+    private GateTimeoutSweeper gateSweeperDisabled() {
+        return new GateTimeoutSweeper(Duration.ZERO, Duration.ofMinutes(5), store,
+                ProgressPublisher.NOOP, Clock.systemUTC());
+    }
+
     /** 用桩件替掉真正的调度器：只记录被调用的任务 id，行为由用例注入。 */
     private DagScheduler scheduler() {
         // 后两个开关（requirePlanApproval / requireRewriteApproval）=false：本用例只验「消费 → 调调度器」
         // 这段，不涉及人工评审与门禁；沙箱回收的开关与保留期取默认（开启 / 24h，本处用不到）
-        CoreProperties coreProperties = new CoreProperties(2, List.of("test"), ".unused",
+        CoreProperties coreProperties = CoreProperties.withoutGateTimeout(2, List.of("test"), ".unused",
                 false, false, false, true, Duration.ofHours(24));
         return new DagScheduler(store, coreProperties, new JsonCodec(), List.of(),
                 publishers(ProgressPublisher.NOOP)) {
+            /**
+             * 覆写的是<b>两参</b>版本 —— 消费循环走的就是它（traceparent 是这次执行属于哪条链路的凭据）。
+             * 只覆写单参版会静默地调用到真实实现：任务不跑、断言却只看到「没被调用」，
+             * 排查时很容易往「消息没投递」上想，而问题其实在这个桩件上。
+             */
             @Override
-            public void runTask(long taskId) {
+            public void runTask(long taskId, String parentTraceparent) {
                 runInvocations.add(taskId);
+                runTraceparents.add(parentTraceparent);
                 onRun.accept(taskId);
             }
         };

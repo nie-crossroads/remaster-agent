@@ -1,5 +1,6 @@
 package com.remasteragent.core.queue;
 
+import com.remasteragent.core.trace.TracePropagation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Range;
@@ -80,11 +81,18 @@ public class RedisTaskQueue implements TaskQueue {
     }
 
     @Override
-    public void enqueue(long taskId) {
+    public void enqueue(long taskId, String traceparent) {
         StreamOperations<String, String, String> ops = redis.opsForStream();
-        RecordId id = ops.add(MapRecord.create(properties.streamKey(), Map.of(FIELD_TASK_ID, String.valueOf(taskId))));
+        // traceparent 是【可选字段】：没有上游链路时干脆不写这个键，
+        // 而不是写一个空字符串 —— 后者在消费侧需要额外判空串，多一处能写错的地方。
+        Map<String, String> body = traceparent == null || traceparent.isBlank()
+                ? Map.of(FIELD_TASK_ID, String.valueOf(taskId))
+                : Map.of(FIELD_TASK_ID, String.valueOf(taskId), TracePropagation.TRACEPARENT, traceparent);
+        RecordId id = ops.add(MapRecord.create(properties.streamKey(), body));
         ops.trim(properties.streamKey(), STREAM_MAX_LENGTH, true);
-        log.info("任务 #{} 已投递到队列，消息 id={}", taskId, id == null ? "?" : id.getValue());
+        log.info("任务 #{} 已投递到队列，消息 id={}（链路 {}）",
+                taskId, id == null ? "?" : id.getValue(),
+                traceparent == null || traceparent.isBlank() ? "无上游" : "已透传");
     }
 
     @Override
@@ -150,14 +158,20 @@ public class RedisTaskQueue implements TaskQueue {
      * <p>解不出来的消息会被<b>立刻确认掉</b>并记错误日志：一条格式不对的消息如果留在队列里，
      * 每次读取都会再次失败，变成一个堵住消费循环的毒丸。宁可丢一条脏消息并大声报错，
      * 也不要让整个队列停摆 —— 而任务真相在数据库里，脏消息本来也不携带任何状态。
+     *
+     * <p>注意这里的严格程度是<b>分级</b>的：{@code taskId} 解不出来是致命错误（丢消息），
+     * 而 {@code traceparent} 缺失或格式不对只是「这条链路断了」—— 消息照常处理，
+     * 因为追踪是观测，不该让任务跑不动。
      */
     private List<QueueMessage> decodeAll(List<MapRecord<String, String, String>> records) {
         List<QueueMessage> messages = new ArrayList<>(records.size());
         for (MapRecord<String, String, String> record : records) {
             String handle = record.getId().getValue();
-            String rawTaskId = record.getValue() == null ? null : record.getValue().get(FIELD_TASK_ID);
+            Map<String, String> body = record.getValue();
+            String rawTaskId = body == null ? null : body.get(FIELD_TASK_ID);
             try {
-                messages.add(new QueueMessage(handle, Long.parseLong(rawTaskId)));
+                messages.add(new QueueMessage(handle, Long.parseLong(rawTaskId),
+                        body == null ? null : body.get(TracePropagation.TRACEPARENT)));
             } catch (RuntimeException e) {
                 log.error("队列消息 {} 的 {} 字段无法解析为任务 id（值={}），已丢弃",
                         handle, FIELD_TASK_ID, rawTaskId, e);

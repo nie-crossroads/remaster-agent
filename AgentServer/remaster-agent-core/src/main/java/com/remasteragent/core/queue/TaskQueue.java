@@ -34,8 +34,25 @@ public interface TaskQueue {
      * @param handle Redis 侧的消息 id，ACK 时用它定位。刻意不让上层直接接触
      *               {@code RecordId} —— 那是 Redis 的概念，不该渗到消费逻辑里
      * @param taskId 迁移任务 id
+     * @param traceparent 投递方（API 进程）的 W3C trace 上下文，形如
+     *               {@code 00-<traceId>-<spanId>-01}；为空表示这次投递没有上游链路。
+     *
+     *               <p>为什么要把它放进消息体：两个进程之间没有共享内存，OTel 的上下文载体是
+     *               ThreadLocal，出了进程就没了。不带上它，Worker 侧会自成一条新 trace，
+     *               「全链路」就只剩半条 —— 而这件事<b>不会报错</b>，
+     *               只是事后查链路时发现前半段不见了。
      */
-    record QueueMessage(String handle, long taskId) {
+    record QueueMessage(String handle, long taskId, String traceparent) {
+
+        /**
+         * 不带链路上下文的消息 —— 供单测构造，以及「确实没有上游」的场景使用。
+         *
+         * <p>保留这个重载是有意的：让「追踪断了」在代码里表现为一个显式的 {@code null}，
+         * 而不是逼着每个调用点都去编一个假的 traceparent。
+         */
+        public QueueMessage(String handle, long taskId) {
+            this(handle, taskId, null);
+        }
     }
 
     /**
@@ -47,8 +64,18 @@ public interface TaskQueue {
      */
     void initialize();
 
-    /** 投递一个任务。 */
-    void enqueue(long taskId);
+    /** 投递一个任务，不携带链路上下文。等价于 {@code enqueue(taskId, null)}，供单测与无上游场景使用。 */
+    default void enqueue(long taskId) {
+        enqueue(taskId, null);
+    }
+
+    /**
+     * 投递一个任务，并把投递方的 trace 上下文带过去。
+     *
+     * @param traceparent {@code TracePropagation.currentTraceparent()} 的结果；
+     *                    为 null 时 Worker 侧自起一条 trace，不影响任务执行
+     */
+    void enqueue(long taskId, String traceparent);
 
     /**
      * 取一批新消息。阻塞等待至多 {@code blockMillis}，没有消息时返回空列表。

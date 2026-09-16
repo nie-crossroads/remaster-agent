@@ -1,20 +1,29 @@
 package com.remasteragent.web.api;
 
+import com.remasteragent.common.domain.DagNode;
 import com.remasteragent.common.domain.GateStatus;
 import com.remasteragent.common.domain.HumanGate;
 import com.remasteragent.common.domain.MigrationTask;
+import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.TaskStatus;
+import com.remasteragent.common.domain.TraceSpan;
 import com.remasteragent.core.progress.ProgressEvent;
 import com.remasteragent.core.progress.ProgressPublisher;
 import com.remasteragent.core.queue.TaskQueue;
 import com.remasteragent.core.store.TaskStore;
+import com.remasteragent.core.trace.TracePropagation;
+import com.remasteragent.core.trace.TraceTracer;
 import com.remasteragent.web.api.dto.CreateTaskRequest;
 import com.remasteragent.web.api.dto.TaskDetailView;
+import com.remasteragent.web.api.dto.TaskTraceView;
 import com.remasteragent.web.api.dto.TaskView;
 import com.remasteragent.web.sse.SseEventHub;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Scope;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -54,15 +63,25 @@ public class TaskController {
     private final TaskQueryService queryService;
     private final SseEventHub sseEventHub;
     private final ProgressPublisher progressPublisher;
+    private final TraceTracer tracer;
 
+    /** 单测入口：不埋点。 */
     public TaskController(TaskStore taskStore, TaskQueue taskQueue,
                           TaskQueryService queryService, SseEventHub sseEventHub,
                           ProgressPublisher progressPublisher) {
+        this(taskStore, taskQueue, queryService, sseEventHub, progressPublisher, TraceTracer.NOOP);
+    }
+
+    @Autowired
+    public TaskController(TaskStore taskStore, TaskQueue taskQueue,
+                          TaskQueryService queryService, SseEventHub sseEventHub,
+                          ProgressPublisher progressPublisher, TraceTracer tracer) {
         this.taskStore = taskStore;
         this.taskQueue = taskQueue;
         this.queryService = queryService;
         this.sseEventHub = sseEventHub;
         this.progressPublisher = progressPublisher;
+        this.tracer = tracer == null ? TraceTracer.NOOP : tracer;
     }
 
     /**
@@ -74,16 +93,26 @@ public class TaskController {
     @PostMapping
     @ResponseStatus(HttpStatus.ACCEPTED)
     public TaskView create(@Valid @RequestBody CreateTaskRequest request) {
-        ProjectPathValidator.ResolvedInput input =
-                ProjectPathValidator.validate(request.projectRoot(), request.entryFile());
-        int targetJdk = request.targetJdkOrDefault();
+        Span span = tracer.startApi("POST", "/api/tasks");
+        try (Scope ignored = span.makeCurrent()) {
+            ProjectPathValidator.ResolvedInput input =
+                    ProjectPathValidator.validate(request.projectRoot(), request.entryFile());
+            int targetJdk = request.targetJdkOrDefault();
 
-        long taskId = taskStore.createTask(input.projectRoot().toString(), input.entryFile(), targetJdk);
-        enqueueOrFail(taskId, input);
-        log.info("任务 #{} 已创建并投递: 工程={} 目标文件={} JDK={}",
-                taskId, input.projectRoot(), input.entryFile(), targetJdk);
+            long taskId = taskStore.createTask(input.projectRoot().toString(),
+                    input.entryFile(), targetJdk);
+            span.setAttribute("task.id", taskId);
+            enqueueOrFail(taskId, input, TracePropagation.currentTraceparent());
+            log.info("任务 #{} 已创建并投递: 工程={} 目标文件={} JDK={}",
+                    taskId, input.projectRoot(), input.entryFile(), targetJdk);
 
-        return queryService.taskSummary(taskId);
+            TaskView view = queryService.taskSummary(taskId);
+            TraceTracer.endOk(span);
+            return view;
+        } catch (RuntimeException e) {
+            TraceTracer.endException(span, e);
+            throw e;
+        }
     }
 
     /**
@@ -97,9 +126,10 @@ public class TaskController {
      * <p>标记成 FAILED 并带上失败原因，是让这条记录自己说明白发生了什么：
      * 事后翻列表能一眼看出「它没被投递出去」，而不是靠人去猜为什么不动。
      */
-    private void enqueueOrFail(long taskId, ProjectPathValidator.ResolvedInput input) {
+    private void enqueueOrFail(long taskId, ProjectPathValidator.ResolvedInput input,
+                               String traceparent) {
         try {
-            taskQueue.enqueue(taskId);
+            taskQueue.enqueue(taskId, traceparent);
         } catch (Exception e) {
             String reason = "任务投递失败（队列不可用）: " + e.getMessage();
             taskStore.updateTaskStatus(taskId, TaskStatus.FAILED, reason);
@@ -306,8 +336,160 @@ public class TaskController {
 
     private void requeue(long taskId, String message) {
         taskStore.updateTaskStatus(taskId, TaskStatus.PENDING, null);
-        taskQueue.enqueue(taskId);
+        // 把当前请求的 traceparent 一并投出去：这一次「续跑」是由人点按钮触发的，
+        // 让它的 trace 根落在这个 HTTP 请求上，「谁批准的、什么时候、这次跑得怎么样」
+        // 就串成了一条 —— 否则续跑的执行会自成一条无头 trace。
+        taskQueue.enqueue(taskId, TracePropagation.currentTraceparent());
         log.info("任务 #{} 已重新入队: {}", taskId, message);
+    }
+
+    // ------------------------------------------------------------------
+    // 任务控制（阶段 3 收尾：取消 / 重跑）与全链路 Trace
+    // ------------------------------------------------------------------
+
+    /**
+     * 取消任务 —— <b>协作式</b>，不硬杀。
+     *
+     * <h3>为什么分两种走法</h3>
+     * <p>能不能立刻停下来，取决于「此刻有没有节点在跑」：
+     * <ul>
+     *   <li><b>PENDING / WAITING_HUMAN</b>：没有任何节点在执行，可以直接落定 {@code CANCELLED}。
+     *       等评审时取消尤其常见 —— 人看了计划觉得不对，不想让它跑，也不想去点「驳回」。</li>
+     *   <li><b>RUNNING</b>：只能置标志位，由 Worker 在<b>节点边界</b>停下。
+     *       一个节点内部（尤其沙箱里的 {@code mvn test}）没法安全中断：
+     *       硬杀子进程会留下半截工作目录，比多跑一个节点更糟。所以这个请求返回的是
+     *       「已受理」，状态仍是 RUNNING —— 那才是此刻的真实情况。</li>
+     * </ul>
+     *
+     * <p>无论哪条路径都会先把 {@code cancel_requested} 置上：它可能在「判状态」与「落状态」
+     * 之间恰好被 Worker 取走开始执行，只改状态的话那一刻就丢了这个意图。
+     */
+    @PostMapping("/{id}/cancel")
+    public TaskView cancel(@PathVariable long id,
+                           @RequestBody(required = false) CancelTaskRequest request) {
+        MigrationTask task = taskStore.findTask(id)
+                .orElseThrow(() -> new NotFoundException("任务不存在: " + id));
+        if (isTerminal(task.status())) {
+            throw new ConflictException("任务 #" + id + " 已是终态 " + task.status()
+                    + "，无法取消（只有 PENDING / RUNNING / WAITING_HUMAN 可以）");
+        }
+
+        String detail = text(request == null ? null : request.reason());
+        String reason = detail == null ? "任务被人工取消" : "任务被人工取消: " + detail;
+
+        taskStore.requestCancel(id);
+
+        if (task.status() == TaskStatus.RUNNING) {
+            String message = "已请求取消，将在当前节点结束后停止";
+            progressPublisher.publish(ProgressEvent.taskStatus(id, TaskStatus.RUNNING.name(), message));
+            log.info("任务 #{} 已请求取消（正在执行，等 Worker 在节点边界停止）: {}", id, reason);
+            return queryService.taskSummary(id);
+        }
+
+        // 没有节点在跑：可以立刻落定。顺带把等待中的门禁关掉 —— 留着它，
+        // 详情页会一直挂着一张「待审批」的卡片，而那个任务已经没人会去批了。
+        closeOpenGateIfAny(id, reason);
+        taskStore.updateTaskStatus(id, TaskStatus.CANCELLED, reason);
+        progressPublisher.publish(ProgressEvent.taskStatus(id, TaskStatus.CANCELLED.name(), reason));
+        log.info("任务 #{} 已取消: {}", id, reason);
+
+        return queryService.taskSummary(id);
+    }
+
+    /**
+     * 重跑失败/取消的任务。
+     *
+     * <h3>为什么是「退回节点」而不是「新建任务」</h3>
+     * <p>新建任务会丢掉已经攒下的 checkpoint（ANALYZE 的分析结果、已成功文件的改写产物），
+     * 重跑一遍要从头烧 token。退回节点则精确复用：<b>已成功的节点不动</b>，
+     * 只把失败与被跳过的部分放回起跑线。
+     *
+     * <h3>被取消的任务为什么也能重跑</h3>
+     * <p>取消停在节点边界，此时的节点全是「已成功」或「还没跑」—— 没有失败节点可退回，
+     * 但那些 PENDING 节点本身就是断点。所以这里不要求「必须重置到东西」，
+     * 只要还有没跑完的节点，重新入队就能续上。
+     */
+    @PostMapping("/{id}/retry")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public TaskView retry(@PathVariable long id) {
+        MigrationTask task = taskStore.findTask(id)
+                .orElseThrow(() -> new NotFoundException("任务不存在: " + id));
+        if (task.status() != TaskStatus.FAILED && task.status() != TaskStatus.CANCELLED) {
+            throw new ConflictException("任务 #" + id + " 当前状态是 " + task.status()
+                    + "，不能重跑（只有 FAILED / CANCELLED 可以；正在跑的任务请先取消）");
+        }
+
+        List<DagNode> nodes = taskStore.findNodes(id);
+        int reset = taskStore.resetFailedNodes(id);
+        boolean hasPending = nodes.stream().anyMatch(node -> node.status() == NodeStatus.PENDING);
+
+        // 这里刻意【不】把「一个节点都没有」当成无从重跑。节点为空说明任务在铺开 DAG 之前就停了
+        // （刚建单就被取消，或在 PLAN / ANALYZE 铺节点之前就失败）—— 这种任务重新入队后，
+        // Worker 会走 bootstrapDagIfAbsent 把 DAG 重新铺一遍，是能跑的。
+        // 早期版本在这里返 409，实测挡住了最自然的一条路径：建单 → 立刻取消 → 又想让跑起来。
+
+        // 清掉取消标志：不清的话，Worker 取到任务的第一轮循环就会看到「已请求取消」并立刻停下 ——
+        // 表现成「点了重跑，任务闪一下就又变成已取消」。
+        taskStore.clearCancelRequest(id);
+
+        String message;
+        if (reset > 0) {
+            message = "任务重跑：已把 " + reset + " 个失败/跳过节点退回待执行";
+        } else if (hasPending) {
+            message = "任务重跑：从断点继续未完成的节点";
+        } else {
+            message = "任务重跑：没有可续跑的节点，将从头铺开 DAG 再执行";
+        }
+        requeue(id, message);
+        progressPublisher.publish(ProgressEvent.taskStatus(id, TaskStatus.PENDING.name(), message));
+        log.info("任务 #{} 已重跑（重置节点 {} 个，原有节点 {} 个，待执行 {}）",
+                id, reset, nodes.size(), hasPending ? "有" : "无");
+
+        return queryService.taskSummary(id);
+    }
+
+    /**
+     * 任务的全链路 Trace。
+     *
+     * <p>单独一个端点而不是塞进详情：一次任务可能产生几百条 span，而详情是每次刷新都在拉的东西 ——
+     * 让「打开链路面板」这个动作自己去取，详情页的体积和延迟不受影响。
+     *
+     * <p>注意<b>一个任务可能有多条 trace</b>：初次执行一条，之后每次「批准后重新入队」又会起一条
+     * （那是另一次执行，另一次触发者）。这不是缺陷而是事实的反映 —— 所以返回的是
+     * <b>按 traceId 分好组的多次运行</b>（{@link TaskTraceView#runs()}），每组的甘特图各自
+     * 以自己的起点为时间轴原点。
+     *
+     * <p>曾经这里是把全部 span 平铺成一条时间轴、再附一个跨全部运行的「总耗时」。
+     * 那会让「取消 → 重跑」之间几小时的空档把每次真正的耗时压成看不见的细线，
+     * 界面上看起来就是「链路里好多条的进度是空的」。分组是唯一能让比例恢复意义的做法。
+     */
+    @GetMapping("/{id}/trace")
+    public TaskTraceView trace(@PathVariable long id) {
+        // 先确认任务存在，否则拼错的 id 会安静地返回一个空列表，看起来像「这个任务没有埋点」
+        queryService.taskSummary(id);
+        List<TraceSpan> spans = taskStore.findTraceSpans(id);
+        return TaskTraceView.of(spans);
+    }
+
+    /** 把该任务当前等待中的门禁就地关掉（人工取消时用）。没有门在等则是空操作。 */
+    private void closeOpenGateIfAny(long taskId, String reason) {
+        taskStore.findOpenGate(taskId).ifPresent(gate -> {
+            // decideGate 的 `WHERE status='PENDING'` 保证这里不会覆盖别人刚做出的决定
+            if (taskStore.decideGate(gate.id(), GateStatus.REJECTED, "system", reason) > 0) {
+                taskStore.markNodeFailed(gate.nodeId(), reason, null);
+            }
+        });
+    }
+
+    /** 终态判定 —— 与 {@code TaskConsumer} 保持同一套口径（含 CANCELLED）。 */
+    private static boolean isTerminal(TaskStatus status) {
+        return status == TaskStatus.SUCCEEDED
+                || status == TaskStatus.FAILED
+                || status == TaskStatus.CANCELLED;
+    }
+
+    /** 取消任务时的可选理由 —— 会写进任务的失败原因，日后能看出「当时为什么叫停」。 */
+    public record CancelTaskRequest(String reason) {
     }
 
     /** 驳回计划时的可选理由 —— 会写进任务的失败原因，方便日后回看「当时为什么不同意」。 */

@@ -11,11 +11,13 @@ import com.remasteragent.core.progress.ProgressPublisher;
 import com.remasteragent.core.progress.RetryProgressListener;
 import com.remasteragent.core.rag.SourceFiles;
 import com.remasteragent.core.store.TaskStore;
+import com.remasteragent.core.trace.TraceTracer;
 import com.remasteragent.llm.config.LlmProperties;
 import com.remasteragent.llm.plan.MigrationPlanner;
 import com.remasteragent.llm.plan.PlanCommand;
 import com.remasteragent.llm.plan.PlanOutcome;
 import com.remasteragent.tools.ast.JavaSourceAnalyzer;
+import io.opentelemetry.api.trace.Span;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -64,15 +66,12 @@ public class PlanNode implements NodeExecutor {
     private final LlmProperties llmProperties;
     private final CoreProperties coreProperties;
     private final ProgressPublisher progressPublisher;
+    private final TraceTracer tracer;
 
-    /** 单测入口：不发布进度。 */
+    /** 单测入口：不发布进度、不埋点。 */
     public PlanNode(TaskStore taskStore, MigrationPlanner planner, LlmProperties llmProperties,
                     CoreProperties coreProperties) {
-        this.taskStore = taskStore;
-        this.planner = planner;
-        this.llmProperties = llmProperties;
-        this.coreProperties = coreProperties;
-        this.progressPublisher = ProgressPublisher.NOOP;
+        this(taskStore, planner, llmProperties, coreProperties, ProgressPublisher.NOOP, TraceTracer.NOOP);
     }
 
     /**
@@ -82,14 +81,24 @@ public class PlanNode implements NodeExecutor {
     @Autowired
     public PlanNode(TaskStore taskStore, MigrationPlanner planner, LlmProperties llmProperties,
                     CoreProperties coreProperties,
-                    ObjectProvider<ProgressPublisher> publisherProvider) {
+                    ObjectProvider<ProgressPublisher> publisherProvider,
+                    TraceTracer tracer) {
+        this(taskStore, planner, llmProperties, coreProperties,
+                publisherProvider == null
+                        ? ProgressPublisher.NOOP
+                        : publisherProvider.getIfAvailable(() -> ProgressPublisher.NOOP),
+                tracer == null ? TraceTracer.NOOP : tracer);
+    }
+
+    private PlanNode(TaskStore taskStore, MigrationPlanner planner, LlmProperties llmProperties,
+                     CoreProperties coreProperties, ProgressPublisher progressPublisher,
+                     TraceTracer tracer) {
         this.taskStore = taskStore;
         this.planner = planner;
         this.llmProperties = llmProperties;
         this.coreProperties = coreProperties;
-        this.progressPublisher = publisherProvider == null
-                ? ProgressPublisher.NOOP
-                : publisherProvider.getIfAvailable(() -> ProgressPublisher.NOOP);
+        this.progressPublisher = progressPublisher;
+        this.tracer = tracer;
     }
 
     @Override
@@ -115,13 +124,22 @@ public class PlanNode implements NodeExecutor {
                         context.node().id(), context.node().nodeKey(), context.attempt(), "规划"));
 
         PlanOutcome outcome;
+        Span llmSpan = tracer.startLlm(context.task().id(), context.node().id(), NodeType.PLAN.name());
         try {
             outcome = planner.plan(command);
         } catch (MigrationPlanner.PlanFailedException e) {
+            TraceTracer.endError(llmSpan, e.getMessage());
             return NodeOutcome.fail("规划产出不可用: " + e.getMessage());
         } catch (Exception e) {
+            TraceTracer.endException(llmSpan, e);
             return NodeOutcome.fail("调用大模型规划失败: " + e);
         }
+        llmSpan.setAttribute("llm.model", outcome.model() == null ? "unknown" : outcome.model());
+        llmSpan.setAttribute("llm.prompt_tokens", (long) outcome.promptTokens());
+        llmSpan.setAttribute("llm.completion_tokens", (long) outcome.completionTokens());
+        llmSpan.setAttribute("llm.latency_ms", outcome.latencyMs());
+        llmSpan.setAttribute("llm.cost", estimateCost(outcome));
+        TraceTracer.endOk(llmSpan);
 
         recordLlmCall(context, outcome);
 
@@ -191,10 +209,13 @@ public class PlanNode implements NodeExecutor {
         return summaries;
     }
 
-    private void recordLlmCall(NodeContext context, PlanOutcome outcome) {
-        double cost = outcome.promptTokens() / 1_000_000d * llmProperties.inputPricePerMillion()
+    /** 按单价表估算成本 —— 与 span 上的 {@code llm.cost} 共用，避免两处算出两个数。 */
+    private double estimateCost(PlanOutcome outcome) {
+        return outcome.promptTokens() / 1_000_000d * llmProperties.inputPricePerMillion()
                 + outcome.completionTokens() / 1_000_000d * llmProperties.outputPricePerMillion();
+    }
 
+    private void recordLlmCall(NodeContext context, PlanOutcome outcome) {
         taskStore.recordLlmCall(new LlmCallRecord(
                 null,
                 context.task().id(),
@@ -203,9 +224,10 @@ public class PlanNode implements NodeExecutor {
                 NodeType.PLAN.name(),
                 outcome.promptTokens(),
                 outcome.completionTokens(),
-                cost,
+                estimateCost(outcome),
                 outcome.latencyMs(),
-                null,
+                // 当前 span 的 trace id —— 这一行账因此能 join 回整条链路（见 RewriteNode 同处说明）
+                TraceTracer.currentTraceId(),
                 Instant.now()));
     }
 }

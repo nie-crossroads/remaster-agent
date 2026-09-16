@@ -6,10 +6,12 @@ import com.remasteragent.core.config.CoreProperties;
 import com.remasteragent.core.engine.NodeContext;
 import com.remasteragent.core.engine.NodeExecutor;
 import com.remasteragent.core.engine.NodeOutcome;
+import com.remasteragent.core.trace.TraceTracer;
 import com.remasteragent.tools.maven.MavenResultParser;
 import com.remasteragent.tools.sandbox.SandboxExecutor;
 import com.remasteragent.tools.sandbox.SandboxRequest;
 import com.remasteragent.tools.sandbox.SandboxResult;
+import io.opentelemetry.api.trace.Span;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -52,10 +54,13 @@ public class VerifyNode implements NodeExecutor {
 
     private final SandboxExecutor sandboxExecutor;
     private final CoreProperties coreProperties;
+    private final TraceTracer tracer;
 
-    public VerifyNode(SandboxExecutor sandboxExecutor, CoreProperties coreProperties) {
+    public VerifyNode(SandboxExecutor sandboxExecutor, CoreProperties coreProperties,
+                      TraceTracer tracer) {
         this.sandboxExecutor = sandboxExecutor;
         this.coreProperties = coreProperties;
+        this.tracer = tracer == null ? TraceTracer.NOOP : tracer;
     }
 
     @Override
@@ -67,11 +72,24 @@ public class VerifyNode implements NodeExecutor {
     public NodeOutcome execute(NodeContext context) {
         List<String> command = buildCommand();
 
-        SandboxResult sandboxResult = sandboxExecutor.execute(SandboxRequest
-                .builder(context.workspace(), command)
-                .timeout(Duration.ofMinutes(10))
-                .memoryLimitMb(MEMORY_LIMIT_MB)
-                .build());
+        // 沙箱这一段通常是整个任务里最耗时的一跳（一次完整 mvn test 动辄分钟级），
+        // 所以它必须自己有一个 span：只把它藏在「VERIFY 节点耗时」里，
+        // 就没法回答「这次任务的时间是被模型吃掉了，还是被构建吃掉了」。
+        Span sandboxSpan = tracer.startSandbox(context.task().id(), context.node().id(),
+                String.join(" ", command));
+        SandboxResult sandboxResult;
+        try {
+            sandboxResult = sandboxExecutor.execute(SandboxRequest
+                    .builder(context.workspace(), command)
+                    .timeout(Duration.ofMinutes(10))
+                    .memoryLimitMb(MEMORY_LIMIT_MB)
+                    .build());
+        } catch (RuntimeException e) {
+            TraceTracer.endException(sandboxSpan, e);
+            throw e;
+        }
+        sandboxSpan.setAttribute("sandbox.exit_code", (long) sandboxResult.exitCode());
+        sandboxSpan.setAttribute("sandbox.timed_out", sandboxResult.timedOut());
 
         VerifyResult verify = MavenResultParser.toVerifyResult(sandboxResult, context.workspace());
 
@@ -81,11 +99,15 @@ public class VerifyNode implements NodeExecutor {
                 verify.durationMs());
 
         if (verify.isGreen()) {
+            TraceTracer.endOk(sandboxSpan);
             return NodeOutcome.ok(verify);
         }
 
         String feedback = buildFailureFeedback(verify);
         warnIfFeedbackIsBlind(verify);
+        // 「沙箱跑出来了、代码没过」是业务失败，不是执行故障 —— 两者在报表上必须分得开：
+        // 把编译不过记成 ERROR 会让「任务出错率」把正常业务结论也算进去。
+        TraceTracer.endError(sandboxSpan, verify.failureReason());
         return NodeOutcome.fail(verify, feedback);
     }
 

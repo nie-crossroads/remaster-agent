@@ -38,6 +38,12 @@
     <javaparser.version>3.28.2</javaparser.version>
     <pgvector.version>0.1.6</pgvector.version>
     <java-diff-utils.version>4.17</java-diff-utils.version>
+    <!--
+      OpenTelemetry Java 1.49.0。锁在 BOM 上而不是逐个 artifact 写版本：
+      api / sdk / context 之间是严格配套的，版本错配会在运行期表现为「Span 建了但导不出去」，
+      编译期一点提示都没有。
+    -->
+    <opentelemetry.version>1.49.0</opentelemetry.version>
     <remaster-agent.version>0.1.0-SNAPSHOT</remaster-agent.version>
   </properties>
 
@@ -48,6 +54,15 @@
         <groupId>dev.langchain4j</groupId>
         <artifactId>langchain4j-bom</artifactId>
         <version>${langchain4j.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <!-- 全链路 Trace：api 与 sdk 必须同版本，统一由 BOM 管 -->
+      <dependency>
+        <groupId>io.opentelemetry</groupId>
+        <artifactId>opentelemetry-bom</artifactId>
+        <version>${opentelemetry.version}</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>

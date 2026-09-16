@@ -9,6 +9,7 @@ import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.common.domain.PatchRecord;
 import com.remasteragent.common.domain.TaskStatus;
+import com.remasteragent.common.domain.TraceSpan;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
@@ -19,7 +20,11 @@ import java.sql.Array;
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -85,7 +90,7 @@ public class JdbcTaskStore implements TaskStore {
     public Optional<MigrationTask> findTask(long taskId) {
         List<MigrationTask> rows = jdbc.query("""
                 SELECT id, project_root, entry_file, target_jdk, status, metrics, fail_reason,
-                       created_at, updated_at
+                       cancel_requested, created_at, updated_at
                   FROM migration_task WHERE id = ?
                 """, TASK_MAPPER, taskId);
         return rows.stream().findFirst();
@@ -119,7 +124,7 @@ public class JdbcTaskStore implements TaskStore {
         // 加上 id 才能保证顺序稳定（否则列表会在两次请求之间莫名换位）
         return jdbc.query("""
                 SELECT id, project_root, entry_file, target_jdk, status, metrics, fail_reason,
-                       created_at, updated_at
+                       cancel_requested, created_at, updated_at
                   FROM migration_task
                  ORDER BY created_at DESC, id DESC
                  LIMIT ?
@@ -203,6 +208,49 @@ public class JdbcTaskStore implements TaskStore {
                    SET status = ?, reviewer = ?, comment = ?, decided_at = now()
                  WHERE id = ? AND status = 'PENDING'
                 """, status.name(), reviewer, comment, gateId);
+    }
+
+    @Override
+    public List<OpenGateRef> findOverdueGates(Instant threshold) {
+        // 走 idx_human_gate_pending（partial index）拿到 PENDING 那几行，再 join 出归属任务与节点键。
+        // 不按 decided_at 过滤：PENDING 的行 decided_at 恒为 null，时间判据只能是 created_at。
+        return jdbc.query("""
+                SELECT g.id AS gate_id, g.node_id, n.task_id, n.node_key, g.created_at
+                  FROM human_gate g
+                  JOIN dag_node n ON n.id = g.node_id
+                 WHERE g.status = 'PENDING' AND g.created_at < ?
+                 ORDER BY g.created_at
+                """, (rs, rowNum) -> new OpenGateRef(
+                rs.getLong("gate_id"),
+                rs.getLong("node_id"),
+                rs.getLong("task_id"),
+                rs.getString("node_key"),
+                toInstant(rs.getTimestamp("created_at"))), Timestamp.from(threshold));
+    }
+
+    // ------------------------------------------------------------------
+    // 任务控制（取消 / 重跑）
+    // ------------------------------------------------------------------
+
+    @Override
+    public void requestCancel(long taskId) {
+        jdbc.update("""
+                UPDATE migration_task SET cancel_requested = TRUE, updated_at = now() WHERE id = ?
+                """, taskId);
+    }
+
+    @Override
+    public boolean isCancelRequested(long taskId) {
+        Boolean requested = jdbc.queryForObject(
+                "SELECT cancel_requested FROM migration_task WHERE id = ?", Boolean.class, taskId);
+        return requested != null && requested;
+    }
+
+    @Override
+    public void clearCancelRequest(long taskId) {
+        jdbc.update("""
+                UPDATE migration_task SET cancel_requested = FALSE, updated_at = now() WHERE id = ?
+                """, taskId);
     }
 
     // ------------------------------------------------------------------
@@ -312,10 +360,25 @@ public class JdbcTaskStore implements TaskStore {
     }
 
     @Override
-    public int resetStaleRunningNodes() {
+    public int resetStaleRunningNodes(long taskId) {
+        // 条件里必须带 task_id：这是「多 Worker 并存时不会互相重置对方正在跑的节点」的全部依据
         return jdbc.update("""
-                UPDATE dag_node SET status = 'PENDING', started_at = NULL WHERE status = 'RUNNING'
-                """);
+                UPDATE dag_node SET status = 'PENDING', started_at = NULL
+                 WHERE task_id = ? AND status = 'RUNNING'
+                """, taskId);
+    }
+
+    @Override
+    public int resetFailedNodes(long taskId) {
+        // FAILED 与 SKIPPED 一起重置：回退链上它们成组出现，只放回一半会让最后一轮 VERIFY
+        // 永远停在 SKIPPED，任务立刻再次判失败 —— 表现成「点了重跑但什么都没发生」。
+        // error/result 一并清掉：留着上一轮的失败原因会让新的一轮在日志里看起来像没跑过。
+        return jdbc.update("""
+                UPDATE dag_node
+                   SET status = 'PENDING', error = NULL, result = NULL,
+                       started_at = NULL, finished_at = NULL
+                 WHERE task_id = ? AND status IN ('FAILED', 'SKIPPED')
+                """, taskId);
     }
 
     @Override
@@ -326,6 +389,53 @@ public class JdbcTaskStore implements TaskStore {
                  ORDER BY attempt DESC LIMIT 1
                 """, NODE_MAPPER, taskId, nodeKey);
         return rows.stream().findFirst();
+    }
+
+    // ------------------------------------------------------------------
+    // 全链路 Trace
+    // ------------------------------------------------------------------
+
+    @Override
+    public List<TraceSpan> findTraceSpans(long taskId) {
+        return findTraceSpansByTasks(List.of(taskId)).getOrDefault(taskId, List.of());
+    }
+
+    @Override
+    public Map<Long, List<TraceSpan>> findTraceSpansByTasks(Collection<Long> taskIds) {
+        if (taskIds == null || taskIds.isEmpty()) {
+            // 空 IN 列表在 SQL 里是语法错误（`IN ()`），在 Java 侧就返回，
+            // 而不是让调用方去猜「列表为空时这个方法会不会炸」。
+            return Map.of();
+        }
+        // 占位符按需拼。这里的个数只由调用方给的 id 数量决定，不来自用户输入 ——
+        // 值仍然全部走预编译参数，拼的只是 `?` 的个数。
+        String placeholders = String.join(",", Collections.nCopies(taskIds.size(), "?"));
+        List<TraceSpan> spans = jdbc.query("""
+                SELECT id, trace_id, span_id, parent_span_id, task_id, node_id, name, kind, status,
+                       start_at, end_at, duration_ms, attributes
+                  FROM trace_span WHERE task_id IN (%s) ORDER BY task_id, start_at, id
+                """.formatted(placeholders), TRACE_MAPPER, taskIds.toArray());
+
+        // 分组时保持 LinkedHashMap：入参顺序（taskIds）不入结果，但每组内部
+        // 保持 SQL 的 ORDER BY —— 上层要靠「按 start_at 升序」推出分组顺序。
+        Map<Long, List<TraceSpan>> byTask = new LinkedHashMap<>();
+        for (TraceSpan span : spans) {
+            if (span.taskId() != null) {
+                byTask.computeIfAbsent(span.taskId(), key -> new ArrayList<>()).add(span);
+            }
+        }
+        return byTask;
+    }
+
+    @Override
+    public Optional<String> findTraceId(long taskId) {
+        // LIMIT 1 就够了：同一任务的全部 span 共用同一个 trace id（OTel 语义保证），
+        // 不必去挑「根」那个 —— 按 start_at 取最早的一条只是为了结果稳定可预期。
+        List<String> ids = jdbc.queryForList("""
+                SELECT trace_id FROM trace_span WHERE task_id = ?
+                 ORDER BY start_at, id LIMIT 1
+                """, String.class, taskId);
+        return ids.stream().findFirst();
     }
 
     // ------------------------------------------------------------------
@@ -430,6 +540,7 @@ public class JdbcTaskStore implements TaskStore {
             TaskStatus.valueOf(rs.getString("status")),
             rs.getString("metrics"),
             rs.getString("fail_reason"),
+            rs.getBoolean("cancel_requested"),
             toInstant(rs.getTimestamp("created_at")),
             toInstant(rs.getTimestamp("updated_at")));
 
@@ -454,6 +565,28 @@ public class JdbcTaskStore implements TaskStore {
             rs.getString("comment"),
             toInstant(rs.getTimestamp("created_at")),
             toInstant(rs.getTimestamp("decided_at")));
+
+    /**
+     * trace_span 行映射。
+     *
+     * <p>{@code task_id} / {@code node_id} / {@code duration_ms} 都用 {@code getObject} 取：
+     * 这三列可空，而 {@code getLong} 在 NULL 上会返回 0 —— 「节点 id = 0」这种值会一路
+     * 传进前端，表现成时间轴上多出一条指向不存在节点的空记录，很难联想到是取值方式的问题。
+     */
+    private static final RowMapper<TraceSpan> TRACE_MAPPER = (rs, rowNum) -> new TraceSpan(
+            rs.getLong("id"),
+            rs.getString("trace_id"),
+            rs.getString("span_id"),
+            rs.getString("parent_span_id"),
+            rs.getObject("task_id", Long.class),
+            rs.getObject("node_id", Long.class),
+            rs.getString("name"),
+            rs.getString("kind"),
+            rs.getString("status"),
+            toInstant(rs.getTimestamp("start_at")),
+            toInstant(rs.getTimestamp("end_at")),
+            rs.getObject("duration_ms", Long.class),
+            rs.getString("attributes"));
 
     /** 把 List&lt;Long&gt; 转成 PostgreSQL 数组字面量 {@code "{1,2}"}。 */
     private static String toArrayLiteral(List<Long> ids) {

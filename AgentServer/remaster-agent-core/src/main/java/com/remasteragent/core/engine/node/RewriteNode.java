@@ -16,12 +16,14 @@ import com.remasteragent.core.progress.ProgressPublisher;
 import com.remasteragent.core.progress.RetryProgressListener;
 import com.remasteragent.core.rag.ContextRetriever;
 import com.remasteragent.core.store.TaskStore;
+import com.remasteragent.core.trace.TraceTracer;
 import com.remasteragent.llm.config.LlmProperties;
 import com.remasteragent.llm.rewrite.CodeRewriter;
 import com.remasteragent.llm.rewrite.RewriteCommand;
 import com.remasteragent.llm.rewrite.RewriteOutcome;
 import com.remasteragent.tools.ast.JavaSourceAnalyzer;
 import com.remasteragent.tools.diff.UnifiedDiffGenerator;
+import io.opentelemetry.api.trace.Span;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -94,17 +96,14 @@ public class RewriteNode implements NodeExecutor {
     private final JsonCodec json;
     private final ContextRetriever contextRetriever;
     private final ProgressPublisher progressPublisher;
+    private final TraceTracer tracer;
 
-    /** 单测入口：不发布进度（进度是给页面看的，不是业务数据）。 */
+    /** 单测入口：不发布进度（进度是给页面看的，不是业务数据），也不埋点。 */
     public RewriteNode(TaskStore taskStore, CodeRewriter codeRewriter,
                        LlmProperties llmProperties, JsonCodec json,
                        ContextRetriever contextRetriever) {
-        this.taskStore = taskStore;
-        this.codeRewriter = codeRewriter;
-        this.llmProperties = llmProperties;
-        this.json = json;
-        this.contextRetriever = contextRetriever;
-        this.progressPublisher = ProgressPublisher.NOOP;
+        this(taskStore, codeRewriter, llmProperties, json, contextRetriever,
+                ProgressPublisher.NOOP, TraceTracer.NOOP);
     }
 
     /**
@@ -119,15 +118,26 @@ public class RewriteNode implements NodeExecutor {
     public RewriteNode(TaskStore taskStore, CodeRewriter codeRewriter,
                        LlmProperties llmProperties, JsonCodec json,
                        ContextRetriever contextRetriever,
-                       ObjectProvider<ProgressPublisher> publisherProvider) {
+                       ObjectProvider<ProgressPublisher> publisherProvider,
+                       TraceTracer tracer) {
+        this(taskStore, codeRewriter, llmProperties, json, contextRetriever,
+                publisherProvider == null
+                        ? ProgressPublisher.NOOP
+                        : publisherProvider.getIfAvailable(() -> ProgressPublisher.NOOP),
+                tracer == null ? TraceTracer.NOOP : tracer);
+    }
+
+    private RewriteNode(TaskStore taskStore, CodeRewriter codeRewriter,
+                        LlmProperties llmProperties, JsonCodec json,
+                        ContextRetriever contextRetriever,
+                        ProgressPublisher progressPublisher, TraceTracer tracer) {
         this.taskStore = taskStore;
         this.codeRewriter = codeRewriter;
         this.llmProperties = llmProperties;
         this.json = json;
         this.contextRetriever = contextRetriever;
-        this.progressPublisher = publisherProvider == null
-                ? ProgressPublisher.NOOP
-                : publisherProvider.getIfAvailable(() -> ProgressPublisher.NOOP);
+        this.progressPublisher = progressPublisher;
+        this.tracer = tracer;
     }
 
     @Override
@@ -181,14 +191,22 @@ public class RewriteNode implements NodeExecutor {
         }
 
         RewriteOutcome outcome;
+        Span llmSpan = tracer.startLlm(context.task().id(), context.node().id(),
+                NodeType.REWRITE.name());
         try {
             outcome = codeRewriter.rewrite(command);
         } catch (CodeRewriter.RewriteFailedException e) {
             // 模型产出不可解析属于可重试失败，直接进 attempt+1
+            TraceTracer.endError(llmSpan, e.getMessage());
             return NodeOutcome.fail("模型产出不可用: " + e.getMessage());
         } catch (Exception e) {
+            TraceTracer.endException(llmSpan, e);
             return NodeOutcome.fail("调用大模型失败: " + e);
         }
+        // 模型名、token 与耗时都在拿到响应之后才知道 —— 所以这些属性是「补」上去的，
+        // 而不是建 span 时就能给的。trace 的价值恰恰在这里：它是记录事实，不是声明意图。
+        annotateLlmSpan(llmSpan, outcome);
+        TraceTracer.endOk(llmSpan);
 
         recordLlmCall(context, outcome);
 
@@ -312,10 +330,28 @@ public class RewriteNode implements NodeExecutor {
                 .orElse(null);
     }
 
-    private void recordLlmCall(NodeContext context, RewriteOutcome outcome) {
-        double cost = outcome.promptTokens() / 1_000_000d * llmProperties.inputPricePerMillion()
-                + outcome.completionTokens() / 1_000_000d * llmProperties.outputPricePerMillion();
+    /**
+     * 把「这次模型调用的实际形状」补到 span 上。
+     *
+     * <p>token 与成本写在 span 上，而不是只留在 {@code llm_call} 表里：两处的用途不同 ——
+     * 表是账本（一行一次调用，可聚合可审计），span 是时间轴（这一段在整条链路里的位置与占比）。
+     * 想让报表回答「重试让成本涨了多少」，两边都得有。
+     */
+    private void annotateLlmSpan(Span span, RewriteOutcome outcome) {
+        span.setAttribute("llm.model", outcome.model() == null ? "unknown" : outcome.model());
+        span.setAttribute("llm.prompt_tokens", (long) outcome.promptTokens());
+        span.setAttribute("llm.completion_tokens", (long) outcome.completionTokens());
+        span.setAttribute("llm.latency_ms", outcome.latencyMs());
+        span.setAttribute("llm.cost", estimateCost(outcome));
+    }
 
+    /** 按单价表估算成本。与 {@link #recordLlmCall} 共用同一套算法，避免两处算出两个数。 */
+    private double estimateCost(RewriteOutcome outcome) {
+        return outcome.promptTokens() / 1_000_000d * llmProperties.inputPricePerMillion()
+                + outcome.completionTokens() / 1_000_000d * llmProperties.outputPricePerMillion();
+    }
+
+    private void recordLlmCall(NodeContext context, RewriteOutcome outcome) {
         taskStore.recordLlmCall(new LlmCallRecord(
                 null,
                 context.task().id(),
@@ -324,9 +360,12 @@ public class RewriteNode implements NodeExecutor {
                 NodeType.REWRITE.name(),
                 outcome.promptTokens(),
                 outcome.completionTokens(),
-                cost,
+                estimateCost(outcome),
                 outcome.latencyMs(),
-                null,
+                // 写的就是当前 span 的 trace id —— 它此刻正被 DagScheduler 的节点 span 罩着，
+                // 而节点 span 又挂在任务 span 下。于是这一行账能直接 join 回整条链路，
+                // 这是 trace_id 这个「预留了很久的字段」第一次真正被填上。
+                TraceTracer.currentTraceId(),
                 Instant.now()));
     }
 

@@ -10,6 +10,7 @@
  * 任务状态推送完毕后，store 自动暂停 SSE 连接；切任务由 store 重新订阅。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import DagGraph from '@/components/DagGraph.vue'
 import DiffViewer from '@/components/DiffViewer.vue'
@@ -19,12 +20,15 @@ import NodeTimeline from '@/components/NodeTimeline.vue'
 import PlanReview from '@/components/PlanReview.vue'
 import TaskForm from '@/components/TaskForm.vue'
 import TaskList from '@/components/TaskList.vue'
+import TraceTimeline from '@/components/TraceTimeline.vue'
 import { useTasksStore } from '@/stores/tasks'
 import {
   TASK_STATUS_LABEL,
   TASK_STATUS_TAG,
   formatDuration,
+  formatDurationPair,
   formatRound,
+  slowestHop,
 } from '@/utils/status'
 
 const tasks = useTasksStore()
@@ -68,8 +72,30 @@ const lastTaskHeaderLabel = computed(() => {
 })
 
 /**
+ * 最慢一跳的提示语 —— 链路面板的「不用展开也看得见」的那半句。
+ *
+ * 之所以不在页面顶部复述完整链路（几百条 span）：这一句已经回答了最常被问的那个问题
+ * （「时间花在哪」），而细节仍然需要用户主动展开 —— 按需加载，不是藏着。
+ *
+ * 只看**最近一次执行**：一个任务会被跑好几次（取消、重跑），把历史运行一起算进来，
+ * 「最慢一跳」会变成在回答一个没人问过的问题（「这个任务历史上哪一跳最慢」）。
+ */
+const slowestSpanHint = computed(() => {
+  const runs = tasks.trace?.runs ?? []
+  const latest = runs[runs.length - 1]
+  if (!latest || latest.spans.length === 0) return null
+  const slowest = slowestHop(latest.spans)
+  if (!slowest) return null
+  return `最近一次（第 ${runs.length} 次执行）最慢一跳：${slowest.shortName}（${formatDuration(slowest.durationMs)}）`
+})
+
+/**
  * 实时运行计时：任务 RUNNING 时每秒按 createdAt 起算「已运行 mm:ss」；
- * 非 RUNNING（终态）则停表，改用后端给的 metrics.durationMs（权威、含排队+执行全量）。
+ * 非 RUNNING（终态）则停表，改用后端给的耗时 —— 而且是**两个**：
+ * 「实际运行」= 各次运行的墙钟之和（机器一共干了多久），
+ * 「端到端」= 入队到本次运行结束（你一共等了多久，含排队、含被取消那次的等待）。
+ * 取消重跑过的任务上两者差出数量级（实测 78 秒 vs 2 小时 33 分），
+ * 只给一个数时读者无从知道它答的是哪个问题，所以这里也走共用的成对格式化。
  */
 const now = ref(Date.now())
 let ticker: ReturnType<typeof setInterval> | null = null
@@ -102,10 +128,42 @@ const topDuration = computed(() => {
     if (Number.isNaN(start)) return ''
     return formatDuration(Math.max(0, now.value - start))
   }
-  return formatDuration(t.metrics?.durationMs)
+  return formatDurationPair(t.runDurationMs, t.metrics?.durationMs)
 })
 
 watch(() => detail.value?.task?.status, syncTicker)
+
+/**
+ * 取消任务 —— 先确认再发请求。
+ *
+ * <h3>为什么要确认</h3>
+ * 取消是**不可逆的一步**：重跑虽然能从断点续上，但当前节点已经烧掉的时间和 token 拿不回来。
+ *
+ * <h3>为什么确认文案对 RUNNING 与其它状态不一样</h3>
+ * 因为两者发生的事情完全不同：RUNNING 下请求只是「挂号」，任务还会再跑一会儿；
+ * 其它状态下它会立刻停。用同一句文案，必然对其中一种情况撒谎 ——
+ * 而用户据此形成的预期（「点完就停」/「点完还要等」）恰好决定了他会不会反复点击。
+ */
+async function onCancel(): Promise<void> {
+  const running = detail.value?.task.status === 'RUNNING'
+  try {
+    await ElMessageBox.confirm(
+      running
+        ? '任务正在执行。取消不会立刻中断：当前节点（可能是沙箱里的 mvn test）会先跑完，'
+          + '回到节点边界后才停 —— 强行杀子进程会留下半截工作目录。确定取消吗？'
+        : '确定取消这个任务吗？之后可以用「重跑」从断点继续，已成功的节点不会重跑。',
+      '取消任务',
+      { confirmButtonText: '确定取消', cancelButtonText: '再想想', type: 'warning' },
+    )
+  } catch {
+    // 用户点了「再想想」，什么都不做
+    return
+  }
+  const ok = await tasks.cancelCurrentTask()
+  if (ok) {
+    ElMessage.success(running ? '已请求取消，等当前节点跑完即停' : '任务已取消')
+  }
+}
 
 onMounted(async () => {
   await tasks.refreshList()
@@ -150,13 +208,60 @@ onUnmounted(() => {
         <template v-if="detail">
           <div class="card">
             <div class="detail-header">
-              <h2>{{ lastTaskHeaderLabel }}</h2>
+              <div class="detail-head-row">
+                <h2>{{ lastTaskHeaderLabel }}</h2>
+                <!--
+                  任务控制按钮。可用性判据与后端闸门同源（store 的 canCancel / canRetry），
+                  避免出现「按钮亮着、点下去 409」—— 一个不承认自己不可用的界面比没有按钮更糟。
+
+                  尺寸与表单里的「提交任务」保持同一套（默认尺寸、不 plain）：
+                  这两个动作和提交是同一层级的动作，不该因为渲染在卡片头部就矮一截。
+                  颜色按**动作性质**分：重跑是主色（可逆、接着往下跑），
+                  取消是危险色（不可逆，且会丢掉当前节点已烧掉的时间和 token）。
+                  二者互斥（RUNNING 只给取消、FAILED|CANCELLED 只给重跑），不存在并排比较。
+                -->
+                <div class="controls">
+                  <el-button
+                    v-if="tasks.canCancel"
+                    type="danger"
+                    :loading="tasks.controlling"
+                    :disabled="tasks.cancellingInProgress"
+                    @click="onCancel"
+                  >
+                    {{ tasks.cancellingInProgress ? '正在取消…' : '取消任务' }}
+                  </el-button>
+                  <el-button
+                    v-if="tasks.canRetry"
+                    type="primary"
+                    :loading="tasks.controlling"
+                    @click="tasks.retryCurrentTask()"
+                  >
+                    重跑
+                  </el-button>
+                </div>
+              </div>
+
+              <!--
+                取消是协作式的：点下去之后任务可能还要跑几分钟才停。
+                这段时间界面必须说话，否则用户会以为按钮没生效而反复点击。
+              -->
+              <div v-if="tasks.cancellingInProgress" class="cancel-pending">
+                已请求取消，将在当前节点跑完后停止（节点内部无法安全中断，强行杀子进程会留下半截工作目录）
+              </div>
+
+              <div v-if="tasks.controlError" class="control-error">
+                {{ tasks.controlError }}
+              </div>
+
               <div v-if="detail.task.failReason" class="fail-reason">
-                失败原因：{{ detail.task.failReason }}
+                {{ detail.task.status === 'CANCELLED' ? '取消原因' : '失败原因' }}：{{ detail.task.failReason }}
               </div>
             </div>
 
-            <MetricsPanel :metrics="detail.task.metrics" />
+            <MetricsPanel
+              :metrics="detail.task.metrics"
+              :run-duration-ms="detail.task.runDurationMs ?? null"
+            />
           </div>
 
           <!--
@@ -182,11 +287,21 @@ onUnmounted(() => {
           />
 
           <div class="card">
-            <DagGraph :nodes="detail.nodes" />
+            <DagGraph :nodes="detail.nodes" :gate-node-id="detail.gate?.nodeId ?? null" />
           </div>
 
           <div class="card">
             <NodeTimeline :nodes="detail.nodes" />
+          </div>
+
+          <div class="card">
+            <TraceTimeline
+              :trace="tasks.trace"
+              :loading="tasks.traceLoading"
+              :error="tasks.traceError"
+              @refresh="tasks.loadTrace()"
+            />
+            <div v-if="slowestSpanHint" class="trace-hint">{{ slowestSpanHint }}</div>
           </div>
 
           <div class="card">
@@ -248,6 +363,49 @@ onUnmounted(() => {
   font-size: 14px;
   margin: 0;
   font-family: 'SFMono-Regular', Consolas, monospace;
+}
+
+/* 标题与操作按钮一行：按钮靠右，标题过长时省略而不是把按钮挤下去 */
+.detail-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.detail-head-row h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.controls {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* 间距只由 gap 决定：Element Plus 会给相邻 el-button 再补一层 margin-left，
+   与 gap 叠加会变成双倍（按钮尺寸从 small 提到默认后更明显）。 */
+.controls :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+/* 「已请求取消」的提示：不染成红色 —— 取消不是错误，只是还没停下来 */
+.cancel-pending {
+  font-size: 12px;
+  color: var(--color-warning);
+}
+
+.control-error {
+  font-size: 12px;
+  color: var(--color-danger);
+}
+
+.trace-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .fail-reason {

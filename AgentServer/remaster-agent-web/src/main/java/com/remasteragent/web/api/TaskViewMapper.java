@@ -45,7 +45,15 @@ public class TaskViewMapper {
         this.json = json;
     }
 
-    public TaskView toView(MigrationTask task) {
+    /**
+     * 概要视图。
+     *
+     * @param runDurationMs 累计运行时长，由调用方从 trace_span 现算后传进来
+     *        （{@code null} = 一条 span 都没有）。本类刻意**不去查存储**：
+     *        转换层只做「已加载的数据 → 对外形状」，自己发查询的话，
+     *        列表接口就会在没人注意的情况下退回 N+1。
+     */
+    public TaskView toView(MigrationTask task, Long runDurationMs) {
         return new TaskView(
                 task.id(),
                 task.projectRoot(),
@@ -53,14 +61,16 @@ public class TaskViewMapper {
                 task.targetJdk(),
                 task.status() == null ? null : task.status().name(),
                 task.failReason(),
+                task.cancelRequested(),
                 task.createdAt(),
                 task.updatedAt(),
-                parseMetrics(task.metricsJson()));
+                parseMetrics(task.metricsJson()),
+                runDurationMs);
     }
 
     public TaskDetailView toDetail(MigrationTask task, List<DagNode> nodes,
                                    List<PatchRecord> patches, TaskStore.CostSummary cost,
-                                   boolean planApproved, HumanGate openGate) {
+                                   boolean planApproved, HumanGate openGate, Long runDurationMs) {
         // 补丁表里只有 node_id，轮次在节点上。回退重写会让同一个文件产生多份补丁，
         // 只靠文件名分不出先后 —— 在这里就把轮次并进补丁视图，前端不必再去 join 节点。
         Map<Long, Integer> attemptByNodeId = new HashMap<>();
@@ -68,7 +78,7 @@ public class TaskViewMapper {
             attemptByNodeId.put(node.id(), node.attempt());
         }
         return new TaskDetailView(
-                toView(task),
+                toView(task, runDurationMs),
                 nodes.stream().map(this::toNode).toList(),
                 patches.stream()
                         .map(patch -> new TaskDetailView.PatchView(
@@ -163,6 +173,13 @@ public class TaskViewMapper {
                 node.nodeType() == NodeType.VERIFY ? parseVerify(node.resultJson()) : null);
     }
 
+    /**
+     * 存储里的指标 JSON → 对外形状。
+     *
+     * <p>字段顺序与 {@code MetricsEventShapeTest#toMetricsView} 保持一致 ——
+     * 那个测试断言本形状与 SSE 的 {@code TaskMetricsSnapshot} 属性名完全相同，
+     * 是「跨进程事件载荷必须与 REST 快照同形状」这条教训的守卫。
+     */
     private TaskView.MetricsView parseMetrics(String jsonText) {
         TaskMetrics metrics = read(jsonText, TaskMetrics.class);
         if (metrics == null) {

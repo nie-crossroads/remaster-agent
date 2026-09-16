@@ -77,6 +77,22 @@
       <artifactId>slf4j-api</artifactId>
     </dependency>
 
+    <!--
+      全链路 Trace（阶段 3 收尾）。
+      只引 api + sdk，【刻意不引任何 OTLP exporter】：本项目的 span 落在自己的 PostgreSQL 里
+      （见 JdbcSpanExporter），演示环境不需要额外起一个 collector。
+      想接 Jaeger/Tempo 时加一个 exporter 依赖、在 TraceConfig 里多挂一个 SpanProcessor 即可，
+      调用点（DagScheduler / 各节点）一行都不用改 —— 这正是选 OTel 而不是自研埋点的原因。
+    -->
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-sdk</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>

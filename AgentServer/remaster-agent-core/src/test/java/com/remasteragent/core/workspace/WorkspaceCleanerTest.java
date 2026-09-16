@@ -220,7 +220,7 @@ class WorkspaceCleanerTest {
     }
 
     private static CoreProperties properties(Duration retention) {
-        return new CoreProperties(2, List.of("test"), ".unused", false, false, false, null, retention);
+        return CoreProperties.withoutGateTimeout(2, List.of("test"), ".unused", false, false, false, null, retention);
     }
 
     /** 建一个处于给定状态的任务（用 InMemoryTaskStore 的真实写入，updatedAt 即状态写入时刻）。 */

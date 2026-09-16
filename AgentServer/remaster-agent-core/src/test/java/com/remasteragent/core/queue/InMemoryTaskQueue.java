@@ -22,6 +22,7 @@ public final class InMemoryTaskQueue implements TaskQueue {
     private final Deque<QueueMessage> reclaimable = new ArrayDeque<>();
     private final List<String> ackedHandles = new ArrayList<>();
     private final List<Long> enqueuedTaskIds = new ArrayList<>();
+    private final List<String> enqueuedTraceparents = new ArrayList<>();
 
     private long sequence = 0;
     private int initializeCount = 0;
@@ -32,9 +33,10 @@ public final class InMemoryTaskQueue implements TaskQueue {
     }
 
     @Override
-    public void enqueue(long taskId) {
+    public void enqueue(long taskId, String traceparent) {
         enqueuedTaskIds.add(taskId);
-        fresh.addLast(new QueueMessage("m-" + (++sequence), taskId));
+        enqueuedTraceparents.add(traceparent);
+        fresh.addLast(new QueueMessage("m-" + (++sequence), taskId, traceparent));
     }
 
     @Override
@@ -82,6 +84,11 @@ public final class InMemoryTaskQueue implements TaskQueue {
 
     public List<Long> enqueuedTaskIds() {
         return List.copyOf(enqueuedTaskIds);
+    }
+
+    /** 按投递顺序记录下来的 traceparent —— 用来断言跨进程链路上下文确实被带上了。 */
+    public List<String> enqueuedTraceparents() {
+        return List.copyOf(enqueuedTraceparents);
     }
 
     public boolean isInitialized() {

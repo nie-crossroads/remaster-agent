@@ -20,10 +20,14 @@ import com.remasteragent.core.engine.node.VerifyNode;
 import com.remasteragent.core.progress.ProgressEvent;
 import com.remasteragent.core.progress.ProgressPublisher;
 import com.remasteragent.core.store.TaskStore;
+import com.remasteragent.core.trace.TraceTracer;
 import com.remasteragent.tools.sandbox.WorkspacePreparer;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Scope;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -70,16 +74,36 @@ public class DagScheduler {
     private final JsonCodec json;
     private final Map<NodeType, NodeExecutor> executors = new EnumMap<>(NodeType.class);
     private final ProgressPublisher progressPublisher;
+    private final TraceTracer tracer;
 
+    /**
+     * 单测入口：不埋点、不发布进度。
+     *
+     * <p>编排层的单测刻意不依赖任何基础设施 —— 不连库、不调模型、不跑 Maven、也不起 OTel SDK。
+     * 让埋点成为「可选的最后一层」，是这条纪律能一直守住的必要条件：
+     * 一旦它变成构造 DagScheduler 的硬依赖，所有确定性单测都得先配一套追踪环境。
+     */
     public DagScheduler(TaskStore taskStore,
                         CoreProperties properties,
                         JsonCodec json,
                         List<NodeExecutor> nodeExecutors,
                         ObjectProvider<ProgressPublisher> publisherProvider) {
+        this(taskStore, properties, json, nodeExecutors, publisherProvider, TraceTracer.NOOP);
+    }
+
+    /** 生产入口。 */
+    @Autowired
+    public DagScheduler(TaskStore taskStore,
+                        CoreProperties properties,
+                        JsonCodec json,
+                        List<NodeExecutor> nodeExecutors,
+                        ObjectProvider<ProgressPublisher> publisherProvider,
+                        TraceTracer tracer) {
         this.taskStore = taskStore;
         this.properties = properties;
         this.json = json;
         this.progressPublisher = publisherProvider.getIfAvailable(() -> ProgressPublisher.NOOP);
+        this.tracer = tracer == null ? TraceTracer.NOOP : tracer;
         nodeExecutors.forEach(executor -> this.executors.put(executor.type(), executor));
         log.info("调度器已装配节点执行器: {}", this.executors.keySet());
         logSandboxRoot();
@@ -113,10 +137,62 @@ public class DagScheduler {
      * 而不是在这个方法里开线程池 —— 那样任务状态与线程生命周期就会纠缠在一起。
      */
     public void runTask(long taskId) {
+        runTask(taskId, null);
+    }
+
+    /**
+     * 执行一个任务，并把它挂到上游链路下面。
+     *
+     * @param parentTraceparent 由 API 进程经队列消息带过来的 W3C {@code traceparent}。
+     *                          为 null 时本次执行自成一条 trace —— 追踪断了不影响任务执行。
+     */
+    public void runTask(long taskId, String parentTraceparent) {
         MigrationTask task = taskStore.findTask(taskId)
                 .orElseThrow(() -> new IllegalArgumentException("任务不存在: " + taskId));
 
+        Span taskSpan = tracer.startTask(taskId, task.projectRoot(), task.entryFile(),
+                task.targetJdk(), parentTraceparent);
+        // span 的结束刻意放在 try/catch 之外、且两条路径各一次：放进 finally 就必须额外判断
+        // 「是否已经 end 过」，而漏判的后果是重复导出同一段——比多写两行难查得多。
+        try (Scope ignored = taskSpan.makeCurrent()) {
+            executeTask(task);
+            recordTaskOutcome(taskSpan, taskId);
+        } catch (RuntimeException e) {
+            TraceTracer.endException(taskSpan, e);
+            throw e;
+        }
+        TraceTracer.endOk(taskSpan);
+    }
+
+    /**
+     * 主执行体（在任务 span 的上下文内运行）。
+     *
+     * <p>拆出来是为了让 {@link #runTask(long, String)} 只负责 span 的生死 ——
+     * 「计时开始/结束」与「干活」混在一个方法里时，任何一处提前 return 都可能漏掉 {@code end()}，
+     * 而漏掉的后果是「这条链路永远查不到」，不会报错。
+     */
+    private void executeTask(MigrationTask task) {
+        long taskId = task.id();
+
+        // 取消请求可能在任务排队期间就被置上了（人在它被 Worker 取走前就叫停）。
+        // 在这里先看一眼，是为了省掉一次「把整个工程复制一份」的无用功 ——
+        // 那一步在大工程上要好几秒。
+        if (taskStore.isCancelRequested(taskId)) {
+            finalizeCancelled(task, "任务在开始执行前已被取消");
+            return;
+        }
+
         log.info("开始执行任务 #{} 工程={} 目标文件={}", taskId, task.projectRoot(), task.entryFile());
+
+        // 按任务重置残留的 RUNNING 节点（上一次进程被杀留下的）。
+        // 放在这里而不是 Worker 启动时：重置范围恰好等于「本进程接下来要跑的那份 DAG」，
+        // 多 Worker 并存时互不干扰 —— 全局重置会把别的 Worker 正在跑的节点一起清掉。
+        int reset = taskStore.resetStaleRunningNodes(taskId);
+        if (reset > 0) {
+            log.warn("任务 #{} 开始前重置了 {} 个残留的 RUNNING 节点（上一次进程被杀留下的）",
+                    taskId, reset);
+        }
+
         taskStore.updateTaskStatus(taskId, TaskStatus.RUNNING, null);
         publish(ProgressEvent.taskStatus(taskId, TaskStatus.RUNNING.name(), "任务开始执行"));
 
@@ -134,6 +210,12 @@ public class DagScheduler {
                 }
                 if (pauseForGateIfNeeded(task)) {
                     // 通用 GATE 门禁正在等人工：同样挂起不占 Worker，批准后从 checkpoint 续跑
+                    return;
+                }
+                if (taskStore.isCancelRequested(taskId)) {
+                    // 协作式取消：只在这里（节点边界）停。此刻没有任何节点在跑，
+                    // 停下是干净的 —— 工作目录由 checkpoint 重放生成，不存在半截状态。
+                    finalizeCancelled(task, "任务被人工取消");
                     return;
                 }
                 List<DagNode> runnable = taskStore.findRunnable(taskId);
@@ -160,6 +242,38 @@ public class DagScheduler {
             taskStore.updateTaskStatus(taskId, TaskStatus.FAILED, e.getMessage());
             publish(ProgressEvent.taskStatus(taskId, TaskStatus.FAILED.name(), "任务异常终止: " + e.getMessage()));
             throw e;
+        }
+    }
+
+    /**
+     * 取消落定 —— 把任务置为 {@code CANCELLED}。
+     *
+     * <p>刻意<b>不写指标</b>：取消意味着「没跑完」，此刻算出来的编译/单测通过率只反映中途状态。
+     * 把它写进 {@code metrics} 会让它和「真跑完的结果」混在同一列里，而报表按这一列聚合时
+     * 根本分不出差别 —— 那等于用一个看起来正常的数字污染整个统计。
+     */
+    private void finalizeCancelled(MigrationTask task, String reason) {
+        taskStore.updateTaskStatus(task.id(), TaskStatus.CANCELLED, reason);
+        publish(ProgressEvent.taskStatus(task.id(), TaskStatus.CANCELLED.name(), reason));
+        log.info("⏹ 任务 #{} 已取消: {}", task.id(), reason);
+    }
+
+    /**
+     * 把「这次执行最后落在什么状态」写进任务 span 的属性。
+     *
+     * <p>为什么值得多查一次库：span 的「成功/失败」讲的是<b>执行过程</b>有没有出事，
+     * 而任务状态讲的是<b>业务结论</b>。一个跑完全过程的迁移任务同样可能是 FAILED
+     * （编译没过），这时 span 是 OK 的，只看得不到这个结论。两者都留着，
+     * 「哪一跳最慢」和「最后成没成」才都答得上。
+     *
+     * <p>失败只在日志里 —— 为了写一个属性而让整个任务的收尾抛异常，本末倒置。
+     */
+    private void recordTaskOutcome(Span taskSpan, long taskId) {
+        try {
+            taskStore.findTask(taskId).ifPresent(current ->
+                    taskSpan.setAttribute("task.outcome", current.status().name()));
+        } catch (Exception e) {
+            log.debug("读取任务 #{} 的最终状态以标注 trace 失败（不影响任务）: {}", taskId, e.getMessage());
         }
     }
 
@@ -227,16 +341,39 @@ public class DagScheduler {
     // ------------------------------------------------------------------
 
     /**
-     * 执行一个节点。
+     * 执行一个节点，并给这一段计时。
+     *
+     * <p>节点 span 是整条链路里最整齐的一层 —— 「这个任务的时间花在分析、改写还是验证上」
+     * 全靠它回答。外层只负责 span 的生死，真正的结果判定在 {@link #executeNodeInSpan}，
+     * 因为「结果是什么」只有在知道 {@code NodeOutcome} 的地方才说得清。
      *
      * @return {@code true} 表示该节点<b>挂起</b>（GATE 门禁在等人工）——
      *         调用方应立即返回，不要继续跑同批其它节点，也不要走 finalizeTask
      */
     private boolean executeNode(MigrationTask task, DagNode node, Path workspace) {
+        Span span = tracer.startNode(task.id(), node.id(), node.nodeKey(),
+                node.nodeType().name(), node.attempt());
+        try (Scope ignored = span.makeCurrent()) {
+            return executeNodeInSpan(task, node, workspace, span);
+        } catch (RuntimeException e) {
+            // 只有「标记节点状态时数据库挂了」这类系统故障才会走到这 ——
+            // 节点实现自身的异常在下面已被转成 NodeOutcome.fail
+            TraceTracer.endException(span, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 节点执行体。{@code span} 由调用方创建、在这里按结果结束 ——
+     * 挂起走 {@code endUnset}（既非成功也非失败，只是停了）、成功走 {@code endOk}、
+     * 失败走 {@code endError}。三者混为一谈会让「出错率」这个指标失去意义。
+     */
+    private boolean executeNodeInSpan(MigrationTask task, DagNode node, Path workspace, Span span) {
         NodeExecutor executor = executors.get(node.nodeType());
         if (executor == null) {
             log.error("没有节点类型 {} 的执行器，标记失败", node.nodeType());
             taskStore.markNodeFailed(node.id(), "没有可用的节点执行器: " + node.nodeType(), null);
+            TraceTracer.endError(span, "没有可用的节点执行器: " + node.nodeType());
             return false;
         }
 
@@ -257,6 +394,8 @@ public class DagScheduler {
         }
 
         if (outcome.suspended()) {
+            span.addEvent("gate.suspended");
+            TraceTracer.endUnset(span);
             return suspendForGate(task, node, outcome);
         }
 
@@ -265,6 +404,7 @@ public class DagScheduler {
             log.info("✔ 节点 [{}] attempt={} 成功", node.nodeKey(), node.attempt());
             publish(ProgressEvent.nodeStatus(task.id(), node.id(), node.nodeKey(),
                     NodeStatus.SUCCEEDED.name(), node.attempt(), describe(node)));
+            TraceTracer.endOk(span);
             return false;
         }
 
@@ -274,6 +414,7 @@ public class DagScheduler {
                 NodeStatus.FAILED.name(), node.attempt(), trim(outcome.error(), 200)));
 
         planRetry(task, node, outcome);
+        TraceTracer.endError(span, outcome.error());
         return false;
     }
 

@@ -1,5 +1,5 @@
 import axios, { AxiosError } from 'axios'
-import type { CreateTaskRequest, TaskDetail, TaskView } from './types'
+import type { CreateTaskRequest, TaskDetail, TaskTrace, TaskView } from './types'
 
 /**
  * REST 客户端。
@@ -80,6 +80,46 @@ export async function rejectGate(
   reviewer?: string,
 ): Promise<TaskView> {
   const { data } = await http.post<TaskView>(`/tasks/${id}/gate/reject`, { reviewer, comment })
+  return data
+}
+
+/**
+ * 取消任务 —— **协作式**，后端不硬杀。
+ *
+ * 返回的 TaskView 有两种可能，前端必须如实展示、不能乐观改状态：
+ * - 原先 PENDING / WAITING_HUMAN → 立刻变成 `CANCELLED`；
+ * - 原先 RUNNING → 状态**仍是 RUNNING**（`cancelRequested=true`），
+ *   要等 Worker 在当前节点结束、回到节点边界时才真正停下。
+ *
+ * 第二种情况下前端显示「正在取消…」并继续等 SSE，而不是假装已经停了 ——
+ * 一个会说谎的状态机在排查时毫无价值。
+ */
+export async function cancelTask(id: number, reason?: string): Promise<TaskView> {
+  const { data } = await http.post<TaskView>(`/tasks/${id}/cancel`, { reason })
+  return data
+}
+
+/**
+ * 重跑失败 / 被取消的任务。
+ *
+ * 后端会把 FAILED 与 SKIPPED 的节点一起退回 PENDING（已成功的节点不动，
+ * 所以已经烧掉的 token 不会被重复花一遍），清掉取消标志，然后重新入队。
+ * 返回 202 + 任务概要（状态已回到 PENDING）。
+ */
+export async function retryTask(id: number): Promise<TaskView> {
+  const { data } = await http.post<TaskView>(`/tasks/${id}/retry`)
+  return data
+}
+
+/**
+ * 任务的全链路链路数据。
+ *
+ * 单独一个请求而不是塞进详情：一次任务可能产生几百条 span，
+ * 而详情是每次刷新都在拉的东西 —— 让「打开链路面板」这个动作自己去取，
+ * 详情页的体积和延迟不受影响。
+ */
+export async function getTaskTrace(id: number): Promise<TaskTrace> {
+  const { data } = await http.get<TaskTrace>(`/tasks/${id}/trace`)
   return data
 }
 

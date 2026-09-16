@@ -9,11 +9,14 @@ import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.common.domain.PatchRecord;
 import com.remasteragent.common.domain.TaskStatus;
+import com.remasteragent.common.domain.TraceSpan;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,6 +47,7 @@ public final class InMemoryTaskStore implements TaskStore {
     private final List<LlmCallRecord> llmCalls = new ArrayList<>();
     private final Set<Long> approvedPlans = new java.util.LinkedHashSet<>();
     private final Map<Long, HumanGate> gates = new LinkedHashMap<>();
+    private final List<TraceSpan> spans = new ArrayList<>();
 
     private long taskSeq = 0;
     private long nodeSeq = 0;
@@ -59,7 +63,7 @@ public final class InMemoryTaskStore implements TaskStore {
         long id = ++taskSeq;
         Instant now = Instant.now();
         tasks.put(id, new MigrationTask(id, projectRoot, entryFile, targetJdk,
-                TaskStatus.PENDING, null, null, now, now));
+                TaskStatus.PENDING, null, null, false, now, now));
         return id;
     }
 
@@ -81,7 +85,7 @@ public final class InMemoryTaskStore implements TaskStore {
 
     private static MigrationTask copy(MigrationTask task, TaskStatus status, String metricsJson, String failReason) {
         return new MigrationTask(task.id(), task.projectRoot(), task.entryFile(), task.targetJdk(),
-                status, metricsJson, failReason, task.createdAt(), Instant.now());
+                status, metricsJson, failReason, task.cancelRequested(), task.createdAt(), Instant.now());
     }
 
     @Override
@@ -158,6 +162,55 @@ public final class InMemoryTaskStore implements TaskStore {
         gates.put(gateId, new HumanGate(current.id(), current.nodeId(), status, reviewer,
                 comment, current.createdAt(), Instant.now()));
         return 1;
+    }
+
+    @Override
+    public List<OpenGateRef> findOverdueGates(Instant threshold) {
+        return gates.values().stream()
+                .filter(gate -> gate.status() == GateStatus.PENDING)
+                .filter(gate -> gate.createdAt() != null && gate.createdAt().isBefore(threshold))
+                .map(gate -> {
+                    DagNode node = nodes.get(gate.nodeId());
+                    return new OpenGateRef(gate.id(), gate.nodeId(),
+                            node == null ? 0L : node.taskId(),
+                            node == null ? null : node.nodeKey(),
+                            gate.createdAt());
+                })
+                .sorted(Comparator.comparing(OpenGateRef::createdAt))
+                .toList();
+    }
+
+    // ------------------------------------------------------------------
+    // 任务控制（取消 / 重跑）
+    // ------------------------------------------------------------------
+
+    /**
+     * 取消标志直接写在任务记录上，而不是另开一个 {@code Set<Long>} 存着。
+     *
+     * <p>后者会让同一个语义有两个来源：{@code findTask().cancelRequested()} 读的是记录里的字段，
+     * 而 {@code isCancelRequested()} 读的是集合 —— 一旦只更新了其中一个，就会出现
+     * 「接口说取消了、详情页却显示没取消」这类只在特定用例里复现的假象。
+     */
+    @Override
+    public void requestCancel(long taskId) {
+        tasks.computeIfPresent(taskId, (id, task) -> withCancel(task, true));
+    }
+
+    @Override
+    public boolean isCancelRequested(long taskId) {
+        MigrationTask task = tasks.get(taskId);
+        return task != null && task.cancelRequested();
+    }
+
+    @Override
+    public void clearCancelRequest(long taskId) {
+        tasks.computeIfPresent(taskId, (id, task) -> withCancel(task, false));
+    }
+
+    private static MigrationTask withCancel(MigrationTask task, boolean cancelRequested) {
+        return new MigrationTask(task.id(), task.projectRoot(), task.entryFile(), task.targetJdk(),
+                task.status(), task.metricsJson(), task.failReason(), cancelRequested,
+                task.createdAt(), Instant.now());
     }
 
     // ------------------------------------------------------------------
@@ -239,14 +292,27 @@ public final class InMemoryTaskStore implements TaskStore {
     }
 
     @Override
-    public int resetStaleRunningNodes() {
-        List<Long> stale = nodes.values().stream()
+    public int resetStaleRunningNodes(long taskId) {
+        List<Long> stale = findNodes(taskId).stream()
                 .filter(node -> node.status() == NodeStatus.RUNNING)
                 .map(DagNode::id)
                 .toList();
         stale.forEach(nodeId -> replace(nodeId, node -> with(node, NodeStatus.PENDING,
                 node.resultJson(), node.error())));
         return stale.size();
+    }
+
+    @Override
+    public int resetFailedNodes(long taskId) {
+        List<Long> failed = findNodes(taskId).stream()
+                .filter(node -> node.status() == NodeStatus.FAILED || node.status() == NodeStatus.SKIPPED)
+                .map(DagNode::id)
+                .toList();
+        // 与 JDBC 实现一致：error 与 result 一并清空，避免上一轮的失败原因留在新一轮的现场里
+        failed.forEach(nodeId -> replace(nodeId, node -> new DagNode(
+                node.id(), node.taskId(), node.nodeKey(), node.nodeType(), node.dependsOn(),
+                NodeStatus.PENDING, node.attempt(), null, null, null, null)));
+        return failed.size();
     }
 
     @Override
@@ -269,6 +335,43 @@ public final class InMemoryTaskStore implements TaskStore {
     private static DagNode with(DagNode node, NodeStatus status, String resultJson, String error) {
         return new DagNode(node.id(), node.taskId(), node.nodeKey(), node.nodeType(), node.dependsOn(),
                 status, node.attempt(), resultJson, error, node.startedAt(), node.finishedAt());
+    }
+
+    // ------------------------------------------------------------------
+    // 全链路 Trace
+    // ------------------------------------------------------------------
+
+    @Override
+    public List<TraceSpan> findTraceSpans(long taskId) {
+        return spans.stream()
+                .filter(span -> span.taskId() != null && span.taskId() == taskId)
+                .sorted(Comparator.comparing(TraceSpan::startAt))
+                .toList();
+    }
+
+    @Override
+    public Map<Long, List<TraceSpan>> findTraceSpansByTasks(Collection<Long> taskIds) {
+        if (taskIds == null || taskIds.isEmpty()) {
+            return Map.of();
+        }
+        // LinkedHashSet 去重并保住「首次出现」的顺序 —— 与 JDBC 实现一样，
+        // 返回的 Map 里不含没有 span 的任务。
+        Map<Long, List<TraceSpan>> byTask = new LinkedHashMap<>();
+        for (Long id : new LinkedHashSet<>(taskIds)) {
+            if (id == null) {
+                continue;
+            }
+            List<TraceSpan> rows = findTraceSpans(id);
+            if (!rows.isEmpty()) {
+                byTask.put(id, rows);
+            }
+        }
+        return byTask;
+    }
+
+    @Override
+    public Optional<String> findTraceId(long taskId) {
+        return findTraceSpans(taskId).stream().map(TraceSpan::traceId).findFirst();
     }
 
     // ------------------------------------------------------------------
@@ -340,5 +443,10 @@ public final class InMemoryTaskStore implements TaskStore {
                 .distinct()
                 .sorted()
                 .toList();
+    }
+
+    /** 直接塞一个 span —— 用于验证「读取侧」的形状，不经过 OTel SDK。 */
+    public void addSpan(TraceSpan span) {
+        spans.add(span);
     }
 }

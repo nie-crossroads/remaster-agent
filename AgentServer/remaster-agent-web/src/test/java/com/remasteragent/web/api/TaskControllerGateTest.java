@@ -15,6 +15,8 @@ import java.time.Instant;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -63,7 +65,9 @@ class TaskControllerGateTest {
         verify(taskStore).decideGate(GATE_ID, GateStatus.APPROVED, "alice", null);
         verify(taskStore).markNodeSucceeded(GATE_NODE_ID, null);
         verify(taskStore).updateTaskStatus(TASK_ID, TaskStatus.PENDING, null);
-        verify(taskQueue).enqueue(TASK_ID);
+        // 重新入队时必须把当前请求的 traceparent 带上（这里没有活动 span，所以是 null）：
+        // 这一次「续跑」由人点按钮触发，它的 trace 根该落在那个 HTTP 请求上
+        verify(taskQueue).enqueue(TASK_ID, null);
     }
 
     @Test
@@ -76,7 +80,7 @@ class TaskControllerGateTest {
         assertThrows(ConflictException.class,
                 () -> controller.approveGate(TASK_ID, null));
 
-        verify(taskQueue, never()).enqueue(TASK_ID);
+        verify(taskQueue, never()).enqueue(anyLong(), any());
     }
 
     @Test
@@ -117,7 +121,7 @@ class TaskControllerGateTest {
         verify(taskStore).decideGate(GATE_ID, GateStatus.REJECTED, "bob", "补丁有问题");
         verify(taskStore).markNodeFailed(GATE_NODE_ID, "人工门禁被驳回: 补丁有问题", null);
         verify(taskStore).updateTaskStatus(TASK_ID, TaskStatus.FAILED, "人工门禁被驳回: 补丁有问题");
-        verify(taskQueue, never()).enqueue(TASK_ID);
+        verify(taskQueue, never()).enqueue(anyLong(), any());
     }
 
     // ------------------------------------------------------------------
@@ -131,6 +135,6 @@ class TaskControllerGateTest {
 
     private static MigrationTask task(TaskStatus status) {
         Instant now = Instant.now();
-        return new MigrationTask(TASK_ID, "/proj", "A.java", 21, status, null, null, now, now);
+        return new MigrationTask(TASK_ID, "/proj", "A.java", 21, status, null, null, false, now, now);
     }
 }

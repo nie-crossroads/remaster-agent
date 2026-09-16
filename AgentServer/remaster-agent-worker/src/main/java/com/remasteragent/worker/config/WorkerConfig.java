@@ -1,6 +1,7 @@
 package com.remasteragent.worker.config;
 
 import com.remasteragent.core.engine.DagScheduler;
+import com.remasteragent.core.gate.GateTimeoutSweeper;
 import com.remasteragent.core.queue.QueueProperties;
 import com.remasteragent.core.queue.TaskConsumer;
 import com.remasteragent.core.queue.TaskQueue;
@@ -26,7 +27,9 @@ public class WorkerConfig {
     @Bean(initMethod = "start", destroyMethod = "close")
     public TaskConsumer taskConsumer(TaskQueue queue, TaskStore taskStore,
                                      DagScheduler scheduler, QueueProperties properties,
-                                     WorkspaceCleaner workspaceCleaner) {
-        return new TaskConsumer(queue, taskStore, scheduler, properties, workspaceCleaner);
+                                     WorkspaceCleaner workspaceCleaner,
+                                     GateTimeoutSweeper gateTimeoutSweeper) {
+        return new TaskConsumer(queue, taskStore, scheduler, properties,
+                workspaceCleaner, gateTimeoutSweeper);
     }
 }

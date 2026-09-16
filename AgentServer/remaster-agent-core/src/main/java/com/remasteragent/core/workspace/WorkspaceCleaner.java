@@ -242,8 +242,17 @@ public class WorkspaceCleaner {
         }
     }
 
+    /**
+     * 是否已到终态。
+     *
+     * <p>{@code CANCELLED} 必须算进去：取消之后这个任务的沙箱<b>不会再被写</b>了，
+     * 它和被判失败的任务没有区别。漏掉它会表现成「取消掉的任务，沙箱永远不被回收」——
+     * 而且不会有任何报错，只是磁盘里慢慢多出一批永远不会消失的目录。
+     */
     private static boolean isTerminal(TaskStatus status) {
-        return status == TaskStatus.SUCCEEDED || status == TaskStatus.FAILED;
+        return status == TaskStatus.SUCCEEDED
+                || status == TaskStatus.FAILED
+                || status == TaskStatus.CANCELLED;
     }
 
     private static Instant lastModified(Path dir) {

@@ -7,12 +7,22 @@
  *
  * 对应后端：
  * - TaskView  → com.remasteragent.web.api.dto.TaskView
- * - TaskDetail→ TaskQueryService.taskDetail()（{task, nodes, patches, cost, plan}）
+ * - TaskDetail→ TaskQueryService.taskDetail()（{task, nodes, patches, cost, plan, gate}）
  * - PlanView  → TaskDetailView.PlanView（阶段 2 规划评审）
+ * - GateView  → TaskDetailView.GateView（阶段 3 通用 GATE 门禁）
+ * - TaskTrace → TaskTraceView（阶段 3 全链路 Trace）
  * - ProgressEvent → com.remasteragent.core.progress.ProgressEvent
  */
 
+/**
+ * 任务状态。
+ *
+ * `CANCELLED` 是**终态**，与 `FAILED` 并列但语义不同：失败是「试过了没成」，
+ * 取消是「人不让它继续」。报表统计通过率时必须能把这两者分开 ——
+ * 把主动取消算成失败，会让「这个 Agent 到底行不行」这个结论变得不可信。
+ */
 export type TaskStatus = 'PENDING' | 'RUNNING' | 'WAITING_HUMAN' | 'SUCCEEDED' | 'FAILED'
+  | 'CANCELLED'
 
 export type NodeType = 'ANALYZE' | 'PLAN' | 'REWRITE' | 'VERIFY' | 'GATE'
 
@@ -65,9 +75,34 @@ export interface TaskView {
   targetJdk: number
   status: TaskStatus
   failReason: string | null
+  /**
+   * 是否已被请求取消。
+   *
+   * 与 `status` **并列**而不合并：`RUNNING + cancelRequested` 是一个真实存在的组合 ——
+   * 那正是「点了取消、当前节点还在跑」的状态。一个节点内部（尤其沙箱里的 `mvn test`）
+   * 没法安全中断，所以后端只能置标志位、等节点跑到边界才停。
+   *
+   * 前端据此把按钮显示成「正在取消…」，否则点了取消页面毫无变化，看起来像没生效。
+   */
+  cancelRequested: boolean
   createdAt: string
   updatedAt: string
   metrics: Metrics | null
+  /**
+   * 累计运行时长 = 各次运行的墙钟之和，**不含**排队与「取消到重跑之间人去吃饭」的空档。
+   *
+   * 它回答「机器一共干了多久」，而 `metrics.durationMs` 回答「你一共等了多久」
+   * （入队到本次运行结束）。取消重跑过的任务上两者能差出数量级 —— 实测任务 #10 是
+   * `77 秒` vs `2 小时 33 分`。只给一个数时，读者无从知道它答的是哪个问题。
+   *
+   * **可选**：它由查询接口从 `trace_span` 现算（见后端 `TaskView#runDurationMs`），
+   * SSE 的 `task_metrics` 增量载荷里没有它 —— 增量只覆盖 `metrics`，
+   * 所以增量事件不该把它一起抹掉（`patchListTask` 里显式保留）。
+   *
+   * `null` / `undefined` = 这个任务一条 span 都没有（埋点接上之前的老任务、或埋点被关掉），
+   * 也就是**不知道**，绝不能显示成「运行了 0 秒」。
+   */
+  runDurationMs?: number | null
 }
 
 /** VERIFY 节点的产出 —— 唯一的事实来源。 */
@@ -208,4 +243,68 @@ export interface CreateTaskRequest {
   projectRoot: string
   entryFile: string
   targetJdk?: number
+}
+
+/**
+ * 一个执行阶段（全链路 Trace 的最小单元）。
+ *
+ * 后端：`TaskTraceView.SpanView`。层级 `depth`、短名 `shortName` 都是**服务端算好的** ——
+ * 父指针是还原层级的唯一依据（并行节点的 span 在时间上会交叠，用时间戳套嵌套必然算错）。
+ *
+ * `durationMs` 为 0 表示这个 span 没走完（进程被杀那一类），不是「瞬间完成」。
+ */
+export interface TraceSpanView {
+  id: number | null
+  traceId: string
+  spanId: string
+  parentSpanId: string | null
+  nodeId: number | null
+  /** 完整 span 名，形如 `node:rewrite:com/foo/Bar.java`。 */
+  name: string
+  /** 压缩后的短名，形如 `node: Bar.java` —— 长键会把时间轴挤爆。 */
+  shortName: string
+  /** OTel StatusCode：UNSET / OK / ERROR。 */
+  status: string | null
+  startedAt: string
+  durationMs: number
+  /** 缩进层级，0 = 根。 */
+  depth: number
+}
+
+/**
+ * 一次任务执行（一条 trace）。
+ *
+ * 每次「批准规划 / 批准门禁 / 重跑」都会重新入队，那是**一次新的执行**、由一次新的
+ * HTTP 请求触发，因此自成一条 trace。
+ *
+ * `durationMs` 是**这一组内部**的墙钟跨度（不是各 span 耗时之和 —— 后者会重复计算嵌套）。
+ * 每组甘特图各自以本组的 `startedAt` 为原点，所以组与组之间不互相压缩：
+ * 曾经把多次运行画在同一根轴上，两次执行之间几小时的空档把每次真正的耗时都压成了
+ * 0.6% 的细线 —— 看着像「进度条是空的」。
+ */
+export interface TraceRunView {
+  traceId: string
+  /** 本组最早 span 的开始时刻。 */
+  startedAt: string
+  /** 本组最晚 span 的结束时刻；组内有 span 没跑完（进程被杀那一类）时为 null。 */
+  endedAt: string | null
+  /** 本组墙钟跨度：startedAt → 最晚结束。 */
+  durationMs: number
+  spanCount: number
+  /** 根 span 的短名，用作这组运行的可读标签（如 `task` / `api:POST /api/tasks`）。 */
+  rootName: string
+  spans: TraceSpanView[]
+}
+
+/**
+ * 任务的全链路 Trace —— **按运行分组**，不是一条被硬拼起来的假链路。
+ *
+ * 一个任务会被跑好几次（建单那次 HTTP 请求、被取消的那次、重跑那次…），
+ * 它们各有各的 traceId，`runs` 里一组一条。后端按 `startedAt` **升序**返回，
+ * 展示时倒序一次即可做到「最新一次在上」。
+ */
+export interface TaskTrace {
+  /** 这个任务一共有几次执行。 */
+  traceCount: number
+  runs: TraceRunView[]
 }

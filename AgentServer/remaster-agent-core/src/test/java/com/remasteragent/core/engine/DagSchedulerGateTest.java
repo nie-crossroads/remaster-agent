@@ -198,7 +198,7 @@ class DagSchedulerGateTest {
 
     /** 开启「改写后人工门禁」的调度器；不装 PLAN 执行器 → 走 ANALYZE→REWRITE→GATE→VERIFY 退化拓扑。 */
     private DagScheduler scheduler(InMemoryTaskStore store, NodeExecutor... executors) {
-        CoreProperties properties = new CoreProperties(
+        CoreProperties properties = CoreProperties.withoutGateTimeout(
                 2, List.of("test"), workspaceRoot.toString(), false,
                 // 关掉规划评审：本用例聚焦 GATE 门禁
                 false,

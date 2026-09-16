@@ -15,6 +15,9 @@ import java.time.Instant;
  * @param status      任务状态
  * @param metricsJson 完成后的指标汇总（JSON），对应 JSONB 列；未完成时为空
  * @param failReason  失败原因，成功时为空
+ * @param cancelRequested 是否已被请求取消（协作式停止：API 置位，Worker 在节点边界停下并落 CANCELLED）。
+ *                   它与 {@code status} 是两个维度 —— 一个 RUNNING 且已请求取消的任务，状态仍是 RUNNING，
+ *                   因为此刻确实还有节点在跑，写成 CANCELLED 就是撒谎。前端据它显示「正在取消…」
  * @param createdAt   创建时间
  * @param updatedAt   最后更新时间
  */
@@ -26,6 +29,7 @@ public record MigrationTask(
         TaskStatus status,
         String metricsJson,
         String failReason,
+        boolean cancelRequested,
         Instant createdAt,
         Instant updatedAt
 ) {

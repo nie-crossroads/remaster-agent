@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { approveGate as approveGateApi, approvePlan as approvePlanApi, createTask, describeError, getTask, listTasks, rejectGate as rejectGateApi, rejectPlan as rejectPlanApi } from '@/api/client'
+import { approveGate as approveGateApi, approvePlan as approvePlanApi, cancelTask as cancelTaskApi, createTask, describeError, getTask, getTaskTrace, listTasks, rejectGate as rejectGateApi, rejectPlan as rejectPlanApi, retryTask as retryTaskApi } from '@/api/client'
 import { openTaskEvents } from '@/api/sse'
-import type { CreateTaskRequest, ProgressEvent, TaskDetail, TaskView } from '@/api/types'
+import type { CreateTaskRequest, ProgressEvent, TaskDetail, TaskTrace, TaskView } from '@/api/types'
+import { canCancelStatus, canRetryStatus } from '@/utils/status'
 
 /**
  * 任务工作台的核心状态。
@@ -44,8 +45,13 @@ const DETAIL_REFRESH_MERGE_MS = 250
 /** 事件流保留的条数上限 —— 与后端补发历史的条数一致。 */
 const RECENT_EVENT_LIMIT = 50
 
-/** 已经不会再自己变的终态 —— 到这一步就不必再轮询了。 */
-const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['SUCCEEDED', 'FAILED'])
+/**
+ * 已经不会再自己变的终态 —— 到这一步就不必再轮询了。
+ *
+ * `CANCELLED` 必须在这里：一个被取消的任务同样不会再有进展，
+ * 漏了它会让兜底轮询对着一个死任务每 12 秒打一次 GET。
+ */
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED'])
 
 /** 节点终态 —— 到达它意味着「这一轮的产物已经可读」（补丁在节点内部就写库了）。 */
 const TERMINAL_NODE_STATUSES: ReadonlySet<string> = new Set(['SUCCEEDED', 'FAILED', 'SKIPPED'])
@@ -92,6 +98,26 @@ export const useTasksStore = defineStore('tasks', () => {
   const reviewing = ref(false)
   const reviewError = ref<string | null>(null)
 
+  /**
+   * 取消 / 重跑请求进行中。
+   *
+   * 与 `reviewing` 分开：它们的按钮可能同时可见（比如 RUNNING 的任务只显示取消，
+   * 而终态任务只显示重跑，实际不会并排出现），但**在途的请求不同**——
+   * 共用一个 busy 标志会让「点取消时另一个按钮也变灰」这种莫名表现出现。
+   */
+  const controlling = ref(false)
+  const controlError = ref<string | null>(null)
+
+  /**
+   * 全链路 Trace 数据。
+   *
+   * 与 `currentDetail` 分开按需拉取：一次任务可能产生几百条 span，
+   * 而详情是每次刷新都在拉的东西。并到详情里会让每次刷新都多背一份可能没人看的数据。
+   */
+  const trace = ref<TaskTrace | null>(null)
+  const traceLoading = ref(false)
+  const traceError = ref<string | null>(null)
+
   /** 用于关闭当前 SSE 连接的 cleanup。 */
   let closeCurrentEvents: (() => void) | null = null
 
@@ -136,6 +162,30 @@ export const useTasksStore = defineStore('tasks', () => {
    * 规划评审没有独立的门禁行，只好看状态；门禁有行，就该看行。
    */
   const awaitingGateReview = computed(() => currentDetail.value?.gate != null)
+
+  /**
+   * 现在能不能取消当前任务。
+   *
+   * 判据与后端 `/cancel` 的闸门<b>完全同源</b>（`canCancelStatus`）：
+   * 两边各写一份判据的后果是「按钮亮着、点下去 409」——
+   * 用户看到的是一个不承认自己不可用的界面。
+   */
+  const canCancel = computed(() => canCancelStatus(currentStatus.value))
+
+  /** 现在能不能重跑当前任务。同样与后端 `/retry` 的闸门同源。 */
+  const canRetry = computed(() => canRetryStatus(currentStatus.value))
+
+  /**
+   * 取消请求已经发出、但任务还没真正停下。
+   *
+   * 这个组合（`cancelRequested` 且不是终态）单独拎出来，是因为它在界面上需要
+   * 一句明确的解释：「已请求取消，等当前节点跑完就停」。没有它，用户点完取消
+   * 会发现页面毫无变化 —— 而一个节点跑几分钟是常态，那几分钟里界面必须说话。
+   */
+  const cancellingInProgress = computed(
+    () => currentDetail.value?.task.cancelRequested === true
+      && !TERMINAL_STATUSES.has(currentDetail.value?.task.status ?? ''),
+  )
 
   // -------- mutations --------
 
@@ -199,7 +249,13 @@ export const useTasksStore = defineStore('tasks', () => {
       ...cur,
       status: task.status,
       failReason: task.failReason,
+      cancelRequested: task.cancelRequested,
       metrics: task.metrics ?? cur.metrics,
+      // 累计运行时长由查询接口从 trace_span 现算，**SSE 的 task_metrics 增量里没有它** ——
+      // 它只覆盖 metrics。不在这里跟着回写的话，取消重跑过的任务在列表里会一直显示
+      // 刷新前的旧值（而那个旧值往往正好是「还没跑完」时的 0 或上一轮的数）。
+      // 用 ?? 而不是直接赋值：增量路径上拿到的 task 就是本地对象，不会凭空多出数据。
+      runDurationMs: task.runDurationMs ?? cur.runDurationMs,
     }
   }
 
@@ -234,6 +290,10 @@ export const useTasksStore = defineStore('tasks', () => {
     currentError.value = null
     currentDetail.value = null
     recentEvents.value = []
+    // 链路数据属于「上一个任务」，必须一起清掉：留着它会让新任务的链路面板
+    // 短暂显示另一个任务的时间轴 —— 而那上面的每一段耗时看起来都完全合理
+    clearTrace()
+    controlError.value = null
     // 这次 HTTP 拉取本身就是一次「刚拿到权威状态」，所以先记一次；
     // 否则刚切过来还没等到快照就会被兜底轮询抢先触发一次多余的请求。
     markEvent()
@@ -626,7 +686,9 @@ export const useTasksStore = defineStore('tasks', () => {
     }
   }
 
-  /** 驳回当前等待中的人工门禁：对应节点判失败，任务直接判失败。 */
+  /**
+   * 驳回当前等待中的人工门禁：对应节点判失败，任务直接判失败。
+   */
   async function rejectCurrentGate(comment?: string, reviewer?: string): Promise<boolean> {
     const id = currentDetail.value?.task.id
     if (id == null || reviewing.value) return false
@@ -648,6 +710,97 @@ export const useTasksStore = defineStore('tasks', () => {
     }
   }
 
+  // -------- 任务控制（阶段 3 收尾：取消 / 重跑） --------
+
+  /**
+   * 取消当前任务。
+   *
+   * <h3>为什么回来后一定要再拉一次详情</h3>
+   * 取消对 RUNNING 任务是**异步生效**的：这个请求只置标志位，状态仍是 RUNNING。
+   * 而「已请求取消」这个信息只存在于权威详情里（事件流里没有它的载体），
+   * 所以必须拉一次才能让按钮变成「正在取消…」—— 否则用户点完会发现页面毫无变化。
+   */
+  async function cancelCurrentTask(reason?: string): Promise<boolean> {
+    const id = currentDetail.value?.task.id
+    if (id == null || controlling.value) return false
+    controlling.value = true
+    controlError.value = null
+    try {
+      const updated = await cancelTaskApi(id, reason)
+      if (currentDetail.value) currentDetail.value.task = updated
+      patchListTask(updated)
+      await refreshCurrentDetail()
+      markEvent()
+      return true
+    } catch (e) {
+      controlError.value = describeError(e)
+      // 409 往往意味着别处已经处理过它了，拉一次权威状态纠偏
+      await refreshCurrentDetail()
+      return false
+    } finally {
+      controlling.value = false
+    }
+  }
+
+  /**
+   * 重跑当前任务（仅 FAILED / CANCELLED）。
+   *
+   * 成功后紧接一次详情刷新：重跑的语义是「把失败/跳过的节点退回 PENDING」，
+   * 节点状态在界面上必须立刻跟着变（否则那些 ✗ 会一直挂着，
+   * 让人以为重跑没生效）。同时清空本地的链路数据 —— 它会开始产生新的一条 trace。
+   */
+  async function retryCurrentTask(): Promise<boolean> {
+    const id = currentDetail.value?.task.id
+    if (id == null || controlling.value) return false
+    controlling.value = true
+    controlError.value = null
+    try {
+      const updated = await retryTaskApi(id)
+      if (currentDetail.value) currentDetail.value.task = updated
+      patchListTask(updated)
+      await refreshCurrentDetail()
+      clearTrace()
+      markEvent()
+      return true
+    } catch (e) {
+      controlError.value = describeError(e)
+      await refreshCurrentDetail()
+      return false
+    } finally {
+      controlling.value = false
+    }
+  }
+
+  // -------- 全链路 Trace（阶段 3 收尾） --------
+
+  /**
+   * 拉取当前任务的链路数据。
+   *
+   * 按需触发（用户展开链路面板时才调），不做自动轮询：任务是几十秒到几分钟的过程，
+   * 而链路面板是用来「事后看时间花在哪」的，实时刷新它对判断没有帮助，
+   * 只会让几百条 span 每 12 秒重传一遍。
+   */
+  async function loadTrace(): Promise<boolean> {
+    const id = currentDetail.value?.task.id
+    if (id == null || traceLoading.value) return false
+    traceLoading.value = true
+    traceError.value = null
+    try {
+      trace.value = await getTaskTrace(id)
+      return true
+    } catch (e) {
+      traceError.value = describeError(e)
+      return false
+    } finally {
+      traceLoading.value = false
+    }
+  }
+
+  function clearTrace(): void {
+    trace.value = null
+    traceError.value = null
+  }
+
   return {
     // state
     list,
@@ -665,12 +818,20 @@ export const useTasksStore = defineStore('tasks', () => {
     lastCreatedId,
     reviewing,
     reviewError,
+    controlling,
+    controlError,
+    trace,
+    traceLoading,
+    traceError,
     // getters
     sortedList,
     hasCurrent,
     currentStatus,
     awaitingPlanReview,
     awaitingGateReview,
+    canCancel,
+    canRetry,
+    cancellingInProgress,
     // actions
     refreshList,
     selectTask,
@@ -679,6 +840,10 @@ export const useTasksStore = defineStore('tasks', () => {
     rejectCurrentPlan,
     approveCurrentGate,
     rejectCurrentGate,
+    cancelCurrentTask,
+    retryCurrentTask,
+    loadTrace,
+    clearTrace,
     teardown,
   }
 })

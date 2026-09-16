@@ -20,7 +20,6 @@ import {
   NODE_STATUS_TAG,
   NODE_TYPE_EMOJI,
   NODE_TYPE_LABEL,
-  formatCost,
   formatCoverage,
   formatDuration,
   formatRound,

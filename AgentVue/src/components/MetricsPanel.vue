@@ -24,10 +24,16 @@
 import { computed } from 'vue'
 
 import type { Metrics } from '@/api/types'
-import { formatCost, formatDuration } from '@/utils/status'
+import { formatCost, formatDuration, shouldSplitDuration } from '@/utils/status'
 
 interface Props {
   metrics: Metrics | null
+  /**
+   * 累计运行时长（各次运行墙钟之和）。来自任务视图而非 metrics ——
+   * 查询接口从 trace_span 现算，SSE 增量里没有它。
+   * `null` / 不传 = 没有链路数据（埋点接上之前的老任务），此时只显示端到端。
+   */
+  runDurationMs?: number | null
   taskTitle?: string
 }
 
@@ -45,6 +51,22 @@ type RateState = 'pass' | 'partial' | 'fail' | 'empty'
 const props = defineProps<Props>()
 
 const hasMetrics = computed(() => props.metrics !== null)
+
+/**
+ * 耗时要不要拆成两个数显示。
+ *
+ * 「累计运行时长」答的是「机器一共干了多久」，「端到端耗时」答的是「你一共等了多久」——
+ * 取消重跑过的任务上两者差出数量级（实测任务 #10 是 78 秒 vs 2 小时 33 分）。
+ * 判据与任务列表、顶部状态行共用 `shouldSplitDuration`，三处不能各写一份。
+ */
+const splitDuration = computed(() =>
+  shouldSplitDuration(props.runDurationMs, props.metrics?.durationMs),
+)
+
+/** 大数字显示哪个：能拆开时显示「实际运行」，否则退回端到端。 */
+const primaryDurationMs = computed(() =>
+  splitDuration.value ? props.runDurationMs : props.metrics?.durationMs,
+)
 
 function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, Math.round(value)))
@@ -189,8 +211,11 @@ function verdictLabel(state: RateState): string {
       </div>
 
       <div class="metric">
-        <div class="label">总耗时</div>
-        <div class="big">{{ formatDuration(props.metrics?.durationMs) }}</div>
+        <div class="label">{{ splitDuration ? '实际运行耗时' : '总耗时' }}</div>
+        <div class="big">{{ formatDuration(primaryDurationMs) }}</div>
+        <div v-if="splitDuration" class="small">
+          端到端 {{ formatDuration(props.metrics?.durationMs) }} · 含排队与等待
+        </div>
       </div>
     </div>
   </div>

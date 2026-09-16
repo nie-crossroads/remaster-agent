@@ -8,7 +8,7 @@
 import { computed, onMounted } from 'vue'
 
 import type { TaskStatus } from '@/api/types'
-import { TASK_STATUS_LABEL, TASK_STATUS_TAG, formatCost, formatDuration } from '@/utils/status'
+import { TASK_STATUS_LABEL, TASK_STATUS_TAG, formatCost, formatDurationPair } from '@/utils/status'
 
 import { useTasksStore } from '@/stores/tasks'
 
@@ -63,8 +63,8 @@ function isSelected(id: number): boolean {
         </div>
         <div class="row3">
           <span>JDK {{ task.targetJdk }}</span>
-          <span v-if="task.metrics">{{ formatDuration(task.metrics.durationMs) }}</span>
-          <span v-if="task.metrics">¥ {{ formatCost(task.metrics.totalCost) }}</span>
+          <span v-if="task.metrics">{{ formatDurationPair(task.runDurationMs, task.metrics.durationMs) }}</span>
+          <span v-if="task.metrics">{{ formatCost(task.metrics.totalCost) }}</span>
         </div>
       </li>
     </ul>

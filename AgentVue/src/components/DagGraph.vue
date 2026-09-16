@@ -28,6 +28,12 @@
  * ## 状态直接画在节点上
  * 节点的颜色/边框/箭头含义完全对齐节点状态（等待/运行/成功/失败/跳过）——
  * 这张图是**给人看进度**的，不是装饰。
+ *
+ * ## 「当前挡路的那道门」为什么要单独高亮
+ * GATE 挂起时，图上那个门禁节点的状态是 `PENDING` —— 和其它**还没轮到**的节点长得一模一样。
+ * 但这两者的含义完全相反：前者是「现在就要你去点一下」，后者是「等着就行」。
+ * 不区分的话，用户看着一图灰节点，根本不知道任务为什么不动了。
+ * 所以由调用方把 `gateNodeId`（来自详情接口的 `gate.nodeId`）传进来，图上把它点出来。
  */
 import { computed } from 'vue'
 import { Handle, MarkerType, Position, VueFlow, type Edge, type Node } from '@vue-flow/core'
@@ -39,6 +45,14 @@ import { NODE_TYPE_EMOJI, NODE_TYPE_LABEL, formatRound } from '@/utils/status'
 
 interface Props {
   nodes: DagNode[]
+  /**
+   * 当前正挡路的那道人工门禁的节点 id（后端 `TaskDetailView.gate.nodeId`）。
+   *
+   * 为 null / 不传表示此刻没有门禁挡路 —— 图上不做任何高亮。
+   * 用「节点 id」而不是「有没有门禁」这个布尔量：同一任务先后可能经过多道门，
+   * 只有最旧那道已经被批准、新一道又挂上时，布尔量会指错地方。
+   */
+  gateNodeId?: number | null
 }
 
 /** 节点卡片自定义类型名，与模板里的 `#node-remaster` 对应。 */
@@ -124,6 +138,10 @@ const flowNodes = computed<Node[]>(() =>
       emoji: NODE_TYPE_EMOJI[node.nodeType] ?? '•',
       subtitle: subtitleOf(node),
       error: node.error,
+      // 是不是「此刻挡路的那道门」。放在 data 里而不是改 status ——
+      // 门禁节点的状态确实是 PENDING（它没跑完，只是动不了），把状态改写成别的
+      // 就等于让界面开始说谎。高亮是一个纯视觉的叠加层。
+      blocking: props.gateNodeId != null && node.id === props.gateNodeId,
     },
   })),
 )
@@ -182,12 +200,20 @@ const isEmpty = computed(() => props.nodes.length === 0)
             锚点本身不可见、也不需要交互 —— 这是一张只读的进度视图。
           -->
           <Handle type="target" :position="Position.Left" :connectable="false" />
-          <div class="dag-node" :class="`dag-${String(nodeProps.data.status).toLowerCase()}`">
+          <div
+            class="dag-node"
+            :class="[
+              `dag-${String(nodeProps.data.status).toLowerCase()}`,
+              { 'dag-blocking': nodeProps.data.blocking },
+            ]"
+          >
             <div class="dag-node-head">
               <span class="dag-emoji">{{ nodeProps.data.emoji }}</span>
               <span class="dag-title">{{ nodeProps.data.title }}</span>
               <!-- 轮次一直显示：只在回退时才出现徽标会让人以为「第一轮没有轮次」 -->
               <span class="dag-attempt">{{ formatRound(nodeProps.data.attempt) }}</span>
+              <!-- 挡路的门单独标出来：它的 status 也是 PENDING，与「还没轮到」视觉同形 -->
+              <span v-if="nodeProps.data.blocking" class="dag-blocking-badge">待审批</span>
             </div>
             <div v-if="nodeProps.data.subtitle" class="dag-subtitle">
               {{ nodeProps.data.subtitle }}
@@ -274,6 +300,48 @@ const isEmpty = computed(() => props.nodes.length === 0)
 .dag-pending {
   border-left-color: var(--color-info);
   opacity: 0.75;
+}
+
+/**
+ * 当前挡路的门禁 —— 用告警色 + 呼吸动效把它从一片灰的 PENDING 里拎出来。
+ *
+ * 为什么值得一个动效：门禁挂起时整个任务就停在这儿，而它在图上和其它「还没轮到」的节点
+ * 视觉同形（都是 PENDING 灰）。用户扫一眼图，需要立刻知道「要动手的是这一个」。
+ * `prefers-reduced-motion` 下会关掉动画，此时靠边框与徽标依然能认出来。
+ */
+.dag-blocking {
+  border-color: var(--color-warning);
+  border-left-width: 3px;
+  border-left-color: var(--color-warning);
+  opacity: 1;
+  background: rgba(230, 162, 60, 0.08);
+  box-shadow: 0 0 0 3px rgba(230, 162, 60, 0.15);
+  animation: dag-blocking-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes dag-blocking-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px rgba(230, 162, 60, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(230, 162, 60, 0.05);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dag-blocking {
+    animation: none;
+  }
+}
+
+.dag-blocking-badge {
+  margin-left: auto;
+  font-size: 10px;
+  color: #fff;
+  background: var(--color-warning);
+  border-radius: 3px;
+  padding: 0 4px;
 }
 
 .dag-node-head {
