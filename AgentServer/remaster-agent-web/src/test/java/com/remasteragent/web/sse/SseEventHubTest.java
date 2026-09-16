@@ -254,8 +254,8 @@ class SseEventHubTest {
                 if (missingTasks.contains(taskId)) {
                     throw new NotFoundException("任务不存在: " + taskId);
                 }
-                // 末位 plan=null：本用例只验「快照先发、增量后发」的顺序，不关心计划内容
-                return new TaskDetailView(null, List.of(), List.of(), null, null);
+                // 末两位 plan=null / gate=null：本用例只验「快照先发、增量后发」的顺序，不关心内容
+                return new TaskDetailView(null, List.of(), List.of(), null, null, null);
             }
         };
     }

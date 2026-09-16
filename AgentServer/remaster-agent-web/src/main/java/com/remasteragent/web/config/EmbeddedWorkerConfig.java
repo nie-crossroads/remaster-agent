@@ -5,6 +5,7 @@ import com.remasteragent.core.queue.QueueProperties;
 import com.remasteragent.core.queue.TaskConsumer;
 import com.remasteragent.core.queue.TaskQueue;
 import com.remasteragent.core.store.TaskStore;
+import com.remasteragent.core.workspace.WorkspaceCleaner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -36,9 +37,10 @@ public class EmbeddedWorkerConfig {
     @Bean(initMethod = "start", destroyMethod = "close")
     @ConditionalOnProperty(prefix = "remaster.worker", name = "embedded", havingValue = "true")
     public TaskConsumer embeddedTaskConsumer(TaskQueue queue, TaskStore taskStore,
-                                             DagScheduler scheduler, QueueProperties properties) {
+                                             DagScheduler scheduler, QueueProperties properties,
+                                             WorkspaceCleaner workspaceCleaner) {
         log.warn("内嵌 Worker 已启用（remaster.worker.embedded=true）：任务将在 API 进程内执行。"
                 + "演示与部署请把它设为 false，改用独立的 Worker 进程。");
-        return new TaskConsumer(queue, taskStore, scheduler, properties);
+        return new TaskConsumer(queue, taskStore, scheduler, properties, workspaceCleaner);
     }
 }

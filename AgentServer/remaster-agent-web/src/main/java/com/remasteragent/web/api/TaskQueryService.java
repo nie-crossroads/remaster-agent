@@ -45,7 +45,9 @@ public class TaskQueryService {
                 taskStore.findNodes(taskId),
                 taskStore.findPatches(taskId),
                 taskStore.summarizeCost(taskId),
-                taskStore.isPlanApproved(taskId));
+                taskStore.isPlanApproved(taskId),
+                // 当前等待中的门禁（没有则为 null）—— 评审卡片只在它非空时出现
+                taskStore.findOpenGate(taskId).orElse(null));
     }
 
     /** 任务概要，不存在时抛 404。 */

@@ -53,7 +53,14 @@ spring:
 remaster:
   core:
     max-rewrite-attempts: 2
-    workspace-root: .remaster-workspaces
+    # 见 worker 的同名项。API 进程自身不跑沙箱（除非 worker.embedded=true 内嵌了 Worker），
+    # 但配置需齐备 —— 内嵌模式下这里就是实际生效的值，且必须与 Worker 指向同一处。
+    # 必须是绝对路径（相对路径会随进程工作目录漂移）；部署时用 REMASTER_WORKSPACE_ROOT 覆盖。
+    workspace-root: ${REMASTER_WORKSPACE_ROOT:E:/AITools/WorkBuddy/workspace/langchain-agent-java/.remaster-workspaces}
+    # 沙箱回收（见 worker 的同名项）。API 进程自身不扫（除非内嵌了 Worker —— 那时它才是沙箱的
+    # 创建者，由它来扫），但配置需齐备：内嵌模式下这里就是实际生效的值，且必须与 Worker 一致。
+    workspace-cleanup-enabled: ${REMASTER_WORKSPACE_CLEANUP_ENABLED:true}
+    workspace-retention: ${REMASTER_WORKSPACE_RETENTION:24h}
 
   # 代码 RAG（阶段 2 理解层）。API 进程不执行检索，但配置需齐备（见下 sandbox 的同款说明）。
   rag:

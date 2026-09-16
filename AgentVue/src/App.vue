@@ -13,6 +13,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import DagGraph from '@/components/DagGraph.vue'
 import DiffViewer from '@/components/DiffViewer.vue'
+import GateReview from '@/components/GateReview.vue'
 import MetricsPanel from '@/components/MetricsPanel.vue'
 import NodeTimeline from '@/components/NodeTimeline.vue'
 import PlanReview from '@/components/PlanReview.vue'
@@ -159,17 +160,25 @@ onUnmounted(() => {
           </div>
 
           <!--
-            规划评审放在指标之后、执行图之前：
-            「要你做的事」优先于「看进度」。等待评审时这个卡片的边框会变成警示色，
-            视线自然先落到它上面。
+            规划评审与人工门禁都是「要你做的事」，一起放在指标之后、执行图之前。
+            二者互斥（同一时刻任务只可能卡在其中一个），所以谁出现都先入视线。
           -->
           <PlanReview
             :plan="detail.plan"
             :status="detail.task.status"
             :busy="tasks.reviewing"
             :error="tasks.reviewError"
+            :gate-open="detail.gate !== null"
             @approve="tasks.approveCurrentPlan()"
             @reject="(reason) => tasks.rejectCurrentPlan(reason)"
+          />
+
+          <GateReview
+            :gate="detail.gate"
+            :busy="tasks.reviewing"
+            :error="tasks.reviewError"
+            @approve="(reviewer) => tasks.approveCurrentGate(reviewer)"
+            @reject="(comment, reviewer) => tasks.rejectCurrentGate(comment, reviewer)"
           />
 
           <div class="card">

@@ -16,13 +16,18 @@ import java.util.List;
  *
  * <p>{@code plan} 可为 null —— 未开启 PLAN 的部署（阶段 1 拓扑）本就没有计划，
  * 前端必须把它当成「可能没有」来处理，而不是期望一个空壳对象。
+ *
+ * <p>{@code gate} 可为 null —— 仅当任务此刻卡在一道等待人工的门禁上时才有值。
+ * 它与 {@code plan} 的区别是：计划是「已经发生过的事」（PLAN 的产出，一直在），
+ * 门禁是「正挡在路上、要你去处理的事」（处理完就没了）。
  */
 public record TaskDetailView(
         TaskView task,
         List<NodeView> nodes,
         List<PatchView> patches,
         CostView cost,
-        PlanView plan
+        PlanView plan,
+        GateView gate
 ) {
 
     /**
@@ -111,6 +116,34 @@ public record TaskDetailView(
     public record PlanStepView(
             String filePath,
             String rationale
+    ) {
+    }
+
+    /**
+     * 一道等待人工处理的门禁（GATE 节点）—— 阶段 3「通用人在回路」的评审入口。
+     *
+     * <p>只有任务此刻被某道门挡住时，{@link TaskDetailView#gate()} 才有值；
+     * 前端据此显示「批准 / 驳回」卡片。它出现的<b>唯一条件</b>是库里存在一行
+     * {@code human_gate.status = PENDING}，所以它一旦有值，就确实在等人。
+     *
+     * @param id        门禁 id（审批接口不需要它，但排查时能对上库里的行）
+     * @param nodeId    对应 GATE 节点，用于在 DAG 图上定位这道门
+     * @param nodeKey   节点键，形如 {@code gate:com/foo/Bar.java}
+     * @param filePath  被门禁拦下的文件（从 nodeKey 解析），无则 null
+     * @param status    审批状态（当前只会是 PENDING，预留 APPROVED/REJECTED 以便将来展示历史）
+     * @param comment   挂起说明（「已改写 X，请确认…」）
+     * @param createdAt 挂起时间
+     * @param decidedAt 决定时间（未决定时为 null）
+     */
+    public record GateView(
+            long id,
+            long nodeId,
+            String nodeKey,
+            String filePath,
+            String status,
+            String comment,
+            Instant createdAt,
+            Instant decidedAt
     ) {
     }
 }

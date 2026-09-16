@@ -1,6 +1,8 @@
 package com.remasteragent.core.store;
 
 import com.remasteragent.common.domain.DagNode;
+import com.remasteragent.common.domain.GateStatus;
+import com.remasteragent.common.domain.HumanGate;
 import com.remasteragent.common.domain.LlmCallRecord;
 import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
@@ -63,6 +65,46 @@ public interface TaskStore {
     boolean isPlanApproved(long taskId);
 
     // ------------------------------------------------------------------
+    // 人工门禁（阶段 3 —— 通用 GATE 节点）
+    // ------------------------------------------------------------------
+
+    /**
+     * 为某个 GATE 节点登记一道待审批的门禁，返回自增 id。
+     *
+     * <p>挂起动作与「插入一行 PENDING」是同一件事的两面：把行落下来，
+     * 「这道门存在过、正在等人」这件事才有了持久化的依据，进程被杀也不会丢。
+     *
+     * @param comment 挂起时附带的说明（展示给审批人看「要审什么」），可为空
+     */
+    long insertGate(long nodeId, String comment);
+
+    /**
+     * 取该任务当前<b>唯一</b>一道等待中的门禁（{@code PENDING}）。
+     *
+     * <p>调度器每一轮都问一次它，作为「该不该挂起」的判据。取最新一行而非第一行：
+     * 同一任务可能先后经历多道门，只有最新的那道才是此刻挡路的。
+     *
+     * <p>返回 {@code Optional.empty()} 表示没有门在等 —— 任务可以继续跑。
+     */
+    Optional<HumanGate> findOpenGate(long taskId);
+
+    /** 按 id 取一道门禁（审批接口需要先确认它存在且确实在等待）。 */
+    Optional<HumanGate> findGate(long gateId);
+
+    /** 该任务的全部门禁记录，按创建时间升序 —— 供详情页展示「这道门当时怎么过的」。 */
+    List<HumanGate> findGates(long taskId);
+
+    /**
+     * 落定一次审批决定：写入状态、审批人、意见与决定时间。
+     *
+     * <p>只允许把 {@code PENDING} 改成 {@code APPROVED}/{@code REJECTED}；
+     * 重复决定在 SQL 层用 {@code WHERE status = 'PENDING'} 挡掉，返回受影响行数供调用方判断。
+     *
+     * @return 真正被更新的行数（1 = 落定成功，0 = 这道门已经被处理过）
+     */
+    int decideGate(long gateId, GateStatus status, String reviewer, String comment);
+
+    // ------------------------------------------------------------------
     // 节点（checkpoint）
     // ------------------------------------------------------------------
 
@@ -81,6 +123,17 @@ public interface TaskStore {
     List<DagNode> findRunnable(long taskId);
 
     void markNodeRunning(long nodeId);
+
+    /**
+     * 把节点从 RUNNING 退回 PENDING —— GATE 节点挂起时用。
+     *
+     * <p>它挂起时并<b>没有</b>执行完，所以不能置成任何一个终态；但也不该留在 RUNNING，
+     * 否则 {@code resetStaleRunningNodes}（Worker 重启时的全局清残骸）会把它当成
+     * 「上次被杀的残留」再重置一遍。退回 PENDING 是唯一诚实的表达：
+     * 「它还没跑完，只是现在动不了」。真正阻止它被重复执行的是调度器的门禁判据，
+     * 不是节点状态本身 —— 见 {@code DagScheduler.pauseForGateIfNeeded}。
+     */
+    void markNodePending(long nodeId);
 
     void markNodeSucceeded(long nodeId, String resultJson);
 

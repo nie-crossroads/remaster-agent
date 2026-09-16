@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -312,7 +313,12 @@ class DagSchedulerRollbackTest {
         CoreProperties properties = new CoreProperties(
                 MAX_REWRITE_ATTEMPTS, List.of("test"), workspaceRoot.toString(), false,
                 // 关掉规划评审：单测聚焦回退重写，不引入挂起/批准这条额外状态路径
-                false);
+                false,
+                // 关掉改写后门禁：同上，门禁的挂起/唤醒由 DagSchedulerGateTest 单独覆盖
+                false,
+                // 沙箱回收与本用例无关：保持默认（开启 + 24h）
+                true,
+                Duration.ofHours(24));
         return new DagScheduler(store, properties, new JsonCodec(),
                 List.of(executors), publishers(ProgressPublisher.NOOP));
     }

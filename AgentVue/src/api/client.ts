@@ -57,6 +57,33 @@ export async function rejectPlan(id: number, reason?: string): Promise<TaskView>
 }
 
 /**
+ * 批准当前等待中的人工门禁（GATE 节点）—— 后端动作里含一次「重新入队」，
+ * 任务随即从 checkpoint 续跑。
+ *
+ * 与 approvePlan 同理：后端只接受「WAITING_HUMAN 且存在 PENDING 门禁」的任务，否则 409。
+ * 前端因此不能在乐观 UI 里先把状态改成 RUNNING：真冲突时会显示后端并不认可的状态。
+ * 一律以服务端返回的 TaskView 为准。
+ */
+export async function approveGate(
+  id: number,
+  reviewer?: string,
+  comment?: string,
+): Promise<TaskView> {
+  const { data } = await http.post<TaskView>(`/tasks/${id}/gate/approve`, { reviewer, comment })
+  return data
+}
+
+/** 驳回当前等待中的人工门禁：对应节点判失败，任务直接判失败，不再往下执行。 */
+export async function rejectGate(
+  id: number,
+  comment?: string,
+  reviewer?: string,
+): Promise<TaskView> {
+  const { data } = await http.post<TaskView>(`/tasks/${id}/gate/reject`, { reviewer, comment })
+  return data
+}
+
+/**
  * 把任意异常翻成一句能给人看的话。
  *
  * 后端用 `{"error": "..."}` 或 ProblemDetail 返回业务错误；拿不到就退回状态码。

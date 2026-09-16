@@ -1,6 +1,8 @@
 package com.remasteragent.core.store;
 
 import com.remasteragent.common.domain.DagNode;
+import com.remasteragent.common.domain.GateStatus;
+import com.remasteragent.common.domain.HumanGate;
 import com.remasteragent.common.domain.LlmCallRecord;
 import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
@@ -143,6 +145,67 @@ public class JdbcTaskStore implements TaskStore {
     }
 
     // ------------------------------------------------------------------
+    // 人工门禁（阶段 3）
+    // ------------------------------------------------------------------
+
+    @Override
+    public long insertGate(long nodeId, String comment) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement("""
+                    INSERT INTO human_gate (node_id, status, comment)
+                    VALUES (?, ?, ?)
+                    """, ID_COLUMN);
+            ps.setLong(1, nodeId);
+            ps.setString(2, GateStatus.PENDING.name());
+            ps.setString(3, comment);
+            return ps;
+        }, keyHolder);
+        return requireKey(keyHolder);
+    }
+
+    @Override
+    public Optional<HumanGate> findOpenGate(long taskId) {
+        // human_gate 表没有 task_id 列，靠 node_id → dag_node.task_id 反查。
+        // 取最新一行：同一任务先后可能有多道门，只有最后那道才是此刻挡路的。
+        List<HumanGate> rows = jdbc.query("""
+                SELECT g.* FROM human_gate g
+                  JOIN dag_node n ON n.id = g.node_id
+                 WHERE n.task_id = ? AND g.status = 'PENDING'
+                 ORDER BY g.id DESC LIMIT 1
+                """, GATE_MAPPER, taskId);
+        return rows.stream().findFirst();
+    }
+
+    @Override
+    public Optional<HumanGate> findGate(long gateId) {
+        List<HumanGate> rows = jdbc.query(
+                "SELECT * FROM human_gate WHERE id = ?", GATE_MAPPER, gateId);
+        return rows.stream().findFirst();
+    }
+
+    @Override
+    public List<HumanGate> findGates(long taskId) {
+        return jdbc.query("""
+                SELECT g.* FROM human_gate g
+                  JOIN dag_node n ON n.id = g.node_id
+                 WHERE n.task_id = ?
+                 ORDER BY g.id
+                """, GATE_MAPPER, taskId);
+    }
+
+    @Override
+    public int decideGate(long gateId, GateStatus status, String reviewer, String comment) {
+        // WHERE status = 'PENDING' 是并发安全的护栏：两个人同时点批准，只有第一个 UPDATE
+        // 会命中，第二个影响 0 行 → 调用方据此回 409，不会重复入队把任务跑两遍。
+        return jdbc.update("""
+                UPDATE human_gate
+                   SET status = ?, reviewer = ?, comment = ?, decided_at = now()
+                 WHERE id = ? AND status = 'PENDING'
+                """, status.name(), reviewer, comment, gateId);
+    }
+
+    // ------------------------------------------------------------------
     // 节点
     // ------------------------------------------------------------------
 
@@ -197,6 +260,12 @@ public class JdbcTaskStore implements TaskStore {
     @Override
     public void markNodeRunning(long nodeId) {
         jdbc.update("UPDATE dag_node SET status = 'RUNNING', started_at = now() WHERE id = ?", nodeId);
+    }
+
+    @Override
+    public void markNodePending(long nodeId) {
+        // 同时把 started_at 清掉：它还没跑完，不该挂着一个开始时刻让人以为卡在执行中
+        jdbc.update("UPDATE dag_node SET status = 'PENDING', started_at = NULL WHERE id = ?", nodeId);
     }
 
     @Override
@@ -376,6 +445,15 @@ public class JdbcTaskStore implements TaskStore {
             rs.getString("error"),
             toInstant(rs.getTimestamp("started_at")),
             toInstant(rs.getTimestamp("finished_at")));
+
+    private static final RowMapper<HumanGate> GATE_MAPPER = (rs, rowNum) -> new HumanGate(
+            rs.getLong("id"),
+            rs.getLong("node_id"),
+            GateStatus.valueOf(rs.getString("status")),
+            rs.getString("reviewer"),
+            rs.getString("comment"),
+            toInstant(rs.getTimestamp("created_at")),
+            toInstant(rs.getTimestamp("decided_at")));
 
     /** 把 List&lt;Long&gt; 转成 PostgreSQL 数组字面量 {@code "{1,2}"}。 */
     private static String toArrayLiteral(List<Long> ids) {

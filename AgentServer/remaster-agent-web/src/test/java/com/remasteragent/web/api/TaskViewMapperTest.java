@@ -2,6 +2,8 @@ package com.remasteragent.web.api;
 
 import com.remasteragent.common.agent.PlanResult;
 import com.remasteragent.common.domain.DagNode;
+import com.remasteragent.common.domain.GateStatus;
+import com.remasteragent.common.domain.HumanGate;
 import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
@@ -40,7 +42,7 @@ class TaskViewMapperTest {
 
         TaskDetailView detail = mapper.toDetail(
                 task(), List.of(planNode(1L, NodeStatus.SUCCEEDED, plan)), List.of(),
-                TaskStore.CostSummary.empty(), false);
+                TaskStore.CostSummary.empty(), false, null);
 
         assertTrue(detail.plan() != null);
         assertEquals("把遗留的订单统计模块迁到 java.time", detail.plan().summary());
@@ -61,7 +63,7 @@ class TaskViewMapperTest {
 
         TaskDetailView detail = mapper.toDetail(
                 task(), List.of(planNode(1L, NodeStatus.SUCCEEDED, plan)), List.of(),
-                TaskStore.CostSummary.empty(), true);
+                TaskStore.CostSummary.empty(), true, null);
 
         assertTrue(detail.plan() != null);
         assertTrue(detail.plan().approved());
@@ -81,7 +83,7 @@ class TaskViewMapperTest {
                 planNode(3L, NodeStatus.SUCCEEDED, newPlan));
 
         TaskDetailView detail = mapper.toDetail(task(), nodes, List.of(),
-                TaskStore.CostSummary.empty(), false);
+                TaskStore.CostSummary.empty(), false, null);
 
         assertTrue(detail.plan() != null);
         assertEquals("新计划", detail.plan().summary(),
@@ -97,7 +99,7 @@ class TaskViewMapperTest {
                         NodeStatus.SUCCEEDED, 0, null, null, Instant.now(), Instant.now()));
 
         TaskDetailView detail = mapper.toDetail(task(), nodes, List.of(),
-                TaskStore.CostSummary.empty(), false);
+                TaskStore.CostSummary.empty(), false, null);
 
         assertNull(detail.plan());
     }
@@ -108,7 +110,7 @@ class TaskViewMapperTest {
                 NodeStatus.SUCCEEDED, 0, "{ 这不是 JSON", null, Instant.now(), Instant.now());
 
         TaskDetailView detail = mapper.toDetail(task(), List.of(broken), List.of(),
-                TaskStore.CostSummary.empty(), false);
+                TaskStore.CostSummary.empty(), false, null);
 
         // 详情接口仍应正常返回，只是计划区域没东西 —— 历史任务的旧格式不该让整页打不开
         assertNull(detail.plan());
@@ -126,7 +128,7 @@ class TaskViewMapperTest {
                 rewriteNode(12L, 1));
 
         TaskDetailView detail = mapper.toDetail(task(), nodes,
-                List.of(patch(11L), patch(12L)), TaskStore.CostSummary.empty(), false);
+                List.of(patch(11L), patch(12L)), TaskStore.CostSummary.empty(), false, null);
 
         assertEquals(2, detail.patches().size());
         assertEquals(0, detail.patches().get(0).attempt());
@@ -140,10 +142,43 @@ class TaskViewMapperTest {
         // 补丁与节点是同一事务写进去的，正常不会缺；但历史数据可能缺。
         // 降级为 0 而不是抛异常：为一个标签显示「第 1 轮」而让整页打不开，代价不对等。
         TaskDetailView detail = mapper.toDetail(task(), List.of(), List.of(patch(99L)),
-                TaskStore.CostSummary.empty(), false);
+                TaskStore.CostSummary.empty(), false, null);
 
         assertEquals(1, detail.patches().size());
         assertEquals(0, detail.patches().get(0).attempt());
+    }
+
+    // ------------------------------------------------------------------
+
+    @Test
+    void 等待中的门禁被摊平成评审视图并解析出文件() {
+        // human_gate 表只存 node_id；前端要显示「拦的是哪个文件」，
+        // 这层 join（node_id → node.nodeKey → filePath）在服务端做掉，前端不必自己再翻节点
+        DagNode gateNode = new DagNode(21L, 7L, "gate:src/main/java/com/example/A.java",
+                NodeType.GATE, List.of(11L), NodeStatus.PENDING, 0, null, null, null, null);
+        HumanGate gate = new HumanGate(5L, 21L, GateStatus.PENDING,
+                null, "已改写 src/main/java/com/example/A.java，请确认补丁后再继续验证",
+                Instant.now(), null);
+
+        TaskDetailView detail = mapper.toDetail(task(), List.of(gateNode), List.of(),
+                TaskStore.CostSummary.empty(), false, gate);
+
+        assertTrue(detail.gate() != null);
+        assertEquals(5L, detail.gate().id());
+        assertEquals(21L, detail.gate().nodeId());
+        assertEquals("gate:src/main/java/com/example/A.java", detail.gate().nodeKey());
+        assertEquals("src/main/java/com/example/A.java", detail.gate().filePath(),
+                "文件路径必须从节点键解析出来，前端据此显示待确认文件");
+        assertEquals("PENDING", detail.gate().status());
+    }
+
+    @Test
+    void 没有等待中的门禁时门禁字段为空() {
+        TaskDetailView detail = mapper.toDetail(task(), List.of(), List.of(),
+                TaskStore.CostSummary.empty(), false, null);
+
+        // 前端据此不渲染评审卡片 —— 空壳对象会让它以为有一道待办
+        assertNull(detail.gate());
     }
 
     // ------------------------------------------------------------------

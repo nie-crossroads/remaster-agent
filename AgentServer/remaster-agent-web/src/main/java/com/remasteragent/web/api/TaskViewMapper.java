@@ -3,6 +3,7 @@ package com.remasteragent.web.api;
 import com.remasteragent.common.agent.PlanResult;
 import com.remasteragent.common.agent.VerifyResult;
 import com.remasteragent.common.domain.DagNode;
+import com.remasteragent.common.domain.HumanGate;
 import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
@@ -59,7 +60,7 @@ public class TaskViewMapper {
 
     public TaskDetailView toDetail(MigrationTask task, List<DagNode> nodes,
                                    List<PatchRecord> patches, TaskStore.CostSummary cost,
-                                   boolean planApproved) {
+                                   boolean planApproved, HumanGate openGate) {
         // 补丁表里只有 node_id，轮次在节点上。回退重写会让同一个文件产生多份补丁，
         // 只靠文件名分不出先后 —— 在这里就把轮次并进补丁视图，前端不必再去 join 节点。
         Map<Long, Integer> attemptByNodeId = new HashMap<>();
@@ -76,7 +77,44 @@ public class TaskViewMapper {
                         .toList(),
                 new TaskDetailView.CostView(
                         cost.calls(), cost.promptTokens(), cost.completionTokens(), cost.totalCost()),
-                toPlan(nodes, planApproved));
+                toPlan(nodes, planApproved),
+                toGate(openGate, nodes));
+    }
+
+    /**
+     * 把「当前等待中的门禁」摊成评审卡片要的形状；没有门禁时返回 null。
+     *
+     * <p>节点键从节点列表里按 id 反查 —— human_gate 表只存 node_id，
+     * 而前端要显示「哪道门、拦的是哪个文件」，这层 join 在服务端做掉，
+     * 前端不必为了渲染一句话再去节点数组里找。
+     */
+    private TaskDetailView.GateView toGate(HumanGate gate, List<DagNode> nodes) {
+        if (gate == null) {
+            return null;
+        }
+        String nodeKey = nodes.stream()
+                .filter(node -> node.id() != null && node.id() == gate.nodeId())
+                .map(DagNode::nodeKey)
+                .findFirst()
+                .orElse(null);
+        return new TaskDetailView.GateView(
+                gate.id() == null ? 0L : gate.id(),
+                gate.nodeId(),
+                nodeKey,
+                filePathOf(nodeKey),
+                gate.status() == null ? null : gate.status().name(),
+                gate.comment(),
+                gate.createdAt(),
+                gate.decidedAt());
+    }
+
+    /** 取节点键中 ':' 之后的部分（文件路径）；裸键返回 null。 */
+    private static String filePathOf(String nodeKey) {
+        if (nodeKey == null) {
+            return null;
+        }
+        int colon = nodeKey.indexOf(':');
+        return (colon < 0 || colon == nodeKey.length() - 1) ? null : nodeKey.substring(colon + 1);
     }
 
     /**

@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { approvePlan as approvePlanApi, createTask, describeError, getTask, listTasks, rejectPlan as rejectPlanApi } from '@/api/client'
+import { approveGate as approveGateApi, approvePlan as approvePlanApi, createTask, describeError, getTask, listTasks, rejectGate as rejectGateApi, rejectPlan as rejectPlanApi } from '@/api/client'
 import { openTaskEvents } from '@/api/sse'
 import type { CreateTaskRequest, ProgressEvent, TaskDetail, TaskView } from '@/api/types'
 
@@ -117,11 +117,25 @@ export const useTasksStore = defineStore('tasks', () => {
   /**
    * 当前任务是否正卡在规划评审这一关。
    *
-   * 判据只看<b>任务状态</b>，不看「计划解析出来没有」：计划 JSON 万一读不出来
-   * （老任务、格式漂移），评审这件事依然需要用户处理 —— 按钮消失会让人以为任务没事了，
-   * 而它其实永远挂在那里。计划面板是「给你看的」，状态才是「要你做的」。
+   * 判据是<b>任务状态 + 没有等待中的门禁行</b>：计划 JSON 万一读不出来（老任务、
+   * 格式漂移），评审这件事依然需要用户处理 —— 所以不放宽到「计划存在」这个条件；
+   * 但 `WAITING_HUMAN` 现在被规划评审与 GATE 门禁共用，必须用 `gate` 字段把后者排除掉，
+   * 否则 GATE 挂起时这面板会挂出「批准并继续执行」按钮，而它打的是 /plan/approve ——
+   * 后端会回 409。计划面板是「给你看的」，能点的按钮才是「要你做的」。
    */
-  const awaitingPlanReview = computed(() => currentStatus.value === 'WAITING_HUMAN')
+  const awaitingPlanReview = computed(
+    () => currentStatus.value === 'WAITING_HUMAN' && currentDetail.value?.gate == null
+  )
+
+  /**
+   * 当前任务是否正卡在一道人工门禁（GATE 节点）上。
+   *
+   * 判据是「后端返回了等待中的门禁」（`gate` 字段非空），而<b>不是</b>任务状态 ——
+   * 因为 `WAITING_HUMAN` 同时被「规划评审」和「GATE 门禁」复用，只有 `gate` 字段
+   * 能区分此刻挡路的到底是哪一种。这与 `awaitingPlanReview` 的判据刻意相反：
+   * 规划评审没有独立的门禁行，只好看状态；门禁有行，就该看行。
+   */
+  const awaitingGateReview = computed(() => currentDetail.value?.gate != null)
 
   // -------- mutations --------
 
@@ -582,6 +596,58 @@ export const useTasksStore = defineStore('tasks', () => {
     }
   }
 
+  // -------- 通用人工门禁（阶段 3 —— GATE 节点） --------
+
+  /**
+   * 批准当前等待中的人工门禁。
+   *
+   * 与规划评审完全同构（同一套 `reviewing` / `reviewError` 状态、同样以服务端返回为准、
+   * 成功后刷新详情）—— 二者只是「同一件事（人在回路）的两种触发源」，
+   * 没必要各写一套状态管理。区别只在调用的接口不同。
+   */
+  async function approveCurrentGate(reviewer?: string, comment?: string): Promise<boolean> {
+    const id = currentDetail.value?.task.id
+    if (id == null || reviewing.value) return false
+    reviewing.value = true
+    reviewError.value = null
+    try {
+      const updated = await approveGateApi(id, reviewer, comment)
+      if (currentDetail.value) currentDetail.value.task = updated
+      patchListTask(updated)
+      await refreshCurrentDetail()
+      markEvent()
+      return true
+    } catch (e) {
+      reviewError.value = describeError(e)
+      await refreshCurrentDetail()
+      return false
+    } finally {
+      reviewing.value = false
+    }
+  }
+
+  /** 驳回当前等待中的人工门禁：对应节点判失败，任务直接判失败。 */
+  async function rejectCurrentGate(comment?: string, reviewer?: string): Promise<boolean> {
+    const id = currentDetail.value?.task.id
+    if (id == null || reviewing.value) return false
+    reviewing.value = true
+    reviewError.value = null
+    try {
+      const updated = await rejectGateApi(id, comment, reviewer)
+      if (currentDetail.value) currentDetail.value.task = updated
+      patchListTask(updated)
+      await refreshCurrentDetail()
+      markEvent()
+      return true
+    } catch (e) {
+      reviewError.value = describeError(e)
+      await refreshCurrentDetail()
+      return false
+    } finally {
+      reviewing.value = false
+    }
+  }
+
   return {
     // state
     list,
@@ -604,12 +670,15 @@ export const useTasksStore = defineStore('tasks', () => {
     hasCurrent,
     currentStatus,
     awaitingPlanReview,
+    awaitingGateReview,
     // actions
     refreshList,
     selectTask,
     submit,
     approveCurrentPlan,
     rejectCurrentPlan,
+    approveCurrentGate,
+    rejectCurrentGate,
     teardown,
   }
 })

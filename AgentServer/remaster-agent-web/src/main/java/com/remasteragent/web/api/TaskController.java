@@ -1,5 +1,7 @@
 package com.remasteragent.web.api;
 
+import com.remasteragent.common.domain.GateStatus;
+import com.remasteragent.common.domain.HumanGate;
 import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.TaskStatus;
 import com.remasteragent.core.progress.ProgressEvent;
@@ -206,6 +208,100 @@ public class TaskController {
                     + "，不处于等待规划评审，无法" + action
                     + "（只有 WAITING_HUMAN 状态可以；任务可能未开启评审，或已被处理过）");
         }
+        // WAITING_HUMAN 现在可能来自两种原因：规划评审（本组接口）或通用 GATE 门禁。
+        // 用「有没有等待中的门禁行」区分，指向正确的接口，避免点错按钮后任务纹丝不动
+        if (taskStore.findOpenGate(taskId).isPresent()) {
+            throw new ConflictException("任务 #" + taskId
+                    + " 当前等待的是一道人工门禁（GATE），请改用 "
+                    + "POST /api/tasks/" + taskId + "/gate/approve（或 /gate/reject）");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 通用人工门禁（阶段 3 —— GATE 节点）
+    // ------------------------------------------------------------------
+
+    /**
+     * 批准当前等待中的人工门禁，任务重新入队继续执行。
+     *
+     * <p>与规划评审同构：批准必须<b>原子地</b>包含「落定门禁 + 重新入队」两件事 ——
+     * 只落定不投队列，任务会永远挂着没人执行；只投队列不落定，Worker 起来时门还是 PENDING，
+     * 会立刻又被 {@code pauseForGateIfNeeded} 挂回去。两者缺一不可，所以都在服务端一个动作里完成。
+     */
+    @PostMapping("/{id}/gate/approve")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public TaskView approveGate(@PathVariable long id,
+                                @RequestBody(required = false) DecideGateRequest request) {
+        HumanGate gate = requireOpenGate(id, "批准");
+        String reviewer = text(request == null ? null : request.reviewer());
+        String comment = text(request == null ? null : request.comment());
+
+        if (taskStore.decideGate(gate.id(), GateStatus.APPROVED, reviewer, comment) == 0) {
+            throw new ConflictException("门禁 gate #" + gate.id() + " 已被处理过，无法重复批准");
+        }
+        // 门禁节点必须转成功：下游 VERIFY 依赖它，节点不转 SUCCEEDED 就永远等不到依赖
+        taskStore.markNodeSucceeded(gate.nodeId(), null);
+        requeue(id, "人工门禁已批准，等待 Worker 继续执行");
+
+        progressPublisher.publish(ProgressEvent.taskStatus(
+                id, TaskStatus.PENDING.name(), "人工门禁已批准，已重新排队"));
+        log.info("任务 #{} 的门禁 gate #{} 已批准（reviewer={}）", id, gate.id(), reviewer);
+
+        return queryService.taskSummary(id);
+    }
+
+    /**
+     * 驳回当前等待中的人工门禁：对应节点判失败，任务直接判失败，不再往下执行。
+     *
+     * <p>驳回<b>不清理</b>已铺好的下游节点（VERIFY 等会一直 PENDING）：那是有价值的现场 ——
+     * 回看时能看见「当时这道门拦住了，任务没继续」。抹掉现场只会让「为什么没做」无从追查。
+     */
+    @PostMapping("/{id}/gate/reject")
+    public TaskView rejectGate(@PathVariable long id,
+                               @RequestBody(required = false) DecideGateRequest request) {
+        HumanGate gate = requireOpenGate(id, "驳回");
+        String reviewer = text(request == null ? null : request.reviewer());
+        String comment = text(request == null ? null : request.comment());
+
+        if (taskStore.decideGate(gate.id(), GateStatus.REJECTED, reviewer, comment) == 0) {
+            throw new ConflictException("门禁 gate #" + gate.id() + " 已被处理过，无法重复驳回");
+        }
+        String failReason = comment == null ? "人工门禁被驳回" : "人工门禁被驳回: " + comment;
+        taskStore.markNodeFailed(gate.nodeId(), failReason, null);
+        taskStore.updateTaskStatus(id, TaskStatus.FAILED, failReason);
+        progressPublisher.publish(ProgressEvent.taskStatus(id, TaskStatus.FAILED.name(), failReason));
+        log.info("任务 #{} 的门禁 gate #{} 被驳回: {}", id, gate.id(), failReason);
+
+        return queryService.taskSummary(id);
+    }
+
+    /**
+     * 只有「正在等待一道门禁」的任务才能被批准/驳回。
+     *
+     * <p>两层校验缺一不可：任务状态是 WAITING_HUMAN（大方向对），且库里确实有 PENDING 的门禁行
+     * （精确）。只看状态会把「规划评审」误判成本门禁；只看门禁行则在门已批准、任务还没被 Worker
+     * 取走的那一瞬间会误放行。两道一起看，才能保证「批准的一定是此刻真正挡路的那道门」。
+     */
+    private HumanGate requireOpenGate(long taskId, String action) {
+        MigrationTask task = taskStore.findTask(taskId)
+                .orElseThrow(() -> new NotFoundException("任务不存在: " + taskId));
+        if (task.status() != TaskStatus.WAITING_HUMAN) {
+            throw new ConflictException("任务 #" + taskId + " 当前状态是 " + task.status()
+                    + "，没有等待中的人工门禁，无法" + action
+                    + "（只有 WAITING_HUMAN 且存在 PENDING 门禁时才可以）");
+        }
+        return taskStore.findOpenGate(taskId)
+                .orElseThrow(() -> new ConflictException("任务 #" + taskId
+                        + " 处于 WAITING_HUMAN，但未找到等待中的门禁 —— 若它是在等规划评审，"
+                        + "请改用 POST /api/tasks/" + taskId + "/plan/approve"));
+    }
+
+    private static String text(String value) {
+        return value == null || value.isBlank() ? null : value.trim();
+    }
+
+    /** 门禁审批请求体：审批人与意见，都可选。 */
+    public record DecideGateRequest(String reviewer, String comment) {
     }
 
     private void requeue(long taskId, String message) {

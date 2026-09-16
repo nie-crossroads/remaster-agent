@@ -143,6 +143,30 @@ export interface PlanView {
   approved: boolean
 }
 
+/**
+ * 一道等待人工处理的门禁（GATE 节点，阶段 3「通用人在回路」）。
+ *
+ * 只有任务此刻被某道门挡住时 `TaskDetail.gate` 才有值 —— 它一旦出现就确实在等人。
+ * 与 `PlanView` 的区别是语义方向：计划是「已经发生过的事」（PLAN 的产出，一直在），
+ * 门禁是「正挡在路上、要你去处理的事」（处理完就没了，字段随即变回 null）。
+ *
+ * 后端：`TaskDetailView.GateView`。
+ */
+export interface GateView {
+  id: number
+  /** 对应的 GATE 节点 id，用于在 DAG 图上定位这道门。 */
+  nodeId: number
+  /** 节点键，形如 `gate:com/foo/Bar.java`。 */
+  nodeKey: string | null
+  /** 被门禁拦下的文件（后端从 nodeKey 解析），无则 null。 */
+  filePath: string | null
+  status: string
+  /** 挂起说明：「已改写 X，请确认补丁后再继续验证」。 */
+  comment: string | null
+  createdAt: string
+  decidedAt: string | null
+}
+
 export interface TaskDetail {
   task: TaskView
   nodes: DagNode[]
@@ -150,6 +174,8 @@ export interface TaskDetail {
   cost: CostSummary
   /** 计划可为 null：未开启 PLAN 的部署（阶段 1 拓扑）本就没有计划，前端必须当成可能缺失。 */
   plan: PlanView | null
+  /** 门禁可为 null：只有任务此刻卡在一道等待中的人工门禁上时才有值。 */
+  gate: GateView | null
 }
 
 /**

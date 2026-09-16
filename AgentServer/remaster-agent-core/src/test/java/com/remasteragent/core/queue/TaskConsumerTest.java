@@ -9,11 +9,18 @@ import com.remasteragent.core.config.CoreProperties;
 import com.remasteragent.core.engine.DagScheduler;
 import com.remasteragent.core.progress.ProgressPublisher;
 import com.remasteragent.core.store.InMemoryTaskStore;
+import com.remasteragent.core.workspace.WorkspaceCleaner;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.ObjectProvider;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
@@ -36,6 +43,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>任务不存在 → 丢弃并确认（毒丸消息不能堵住队列）</li>
  *   <li>执行抛异常且任务<b>没有</b>落到终态 → 不确认，留给后续接管重跑</li>
  * </ol>
+ *
+ * <p>另覆盖一条接线：一轮消费会顺带触发过期沙箱回收（判据本身在 {@code WorkspaceCleanerTest}）。
  */
 class TaskConsumerTest {
 
@@ -192,18 +201,47 @@ class TaskConsumerTest {
         assertFalse(queue.isInitialized(), "processOnce 不负责初始化，那是 start 的职责");
     }
 
+    @Test
+    @DisplayName("一轮消费顺带回收过期沙箱：终态且超期的 task-<id> 目录被永久删除")
+    void expiredSandboxIsReclaimedOnProcessOnce(@TempDir Path sandboxRoot) throws IOException {
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        store.updateTaskStatus(taskId, TaskStatus.SUCCEEDED, null);
+        Path sandbox = Files.createDirectories(sandboxRoot.resolve("task-" + taskId));
+        Files.writeString(sandbox.resolve("pom.xml"), "<project/>");
+
+        // 时钟拨到保留期之后：cutoff 落在任务终态时刻（= 刚刚）之后，这份沙箱已过期
+        WorkspaceCleaner expired = new WorkspaceCleaner(sandboxRoot, Duration.ofHours(24), true,
+                Duration.ofMinutes(30), store, Clock.offset(Clock.systemUTC(), Duration.ofHours(25)));
+
+        new TaskConsumer(queue, store, scheduler(), queueProperties(), expired).processOnce();
+
+        assertFalse(Files.exists(sandbox), "过期沙箱应被永久删除（不进回收站）");
+    }
+
     // ------------------------------------------------------------------
     // 装配
     // ------------------------------------------------------------------
 
     private TaskConsumer consumer() {
-        return new TaskConsumer(queue, store, scheduler(), queueProperties());
+        return new TaskConsumer(queue, store, scheduler(), queueProperties(), cleanupDisabled());
+    }
+
+    /**
+     * 默认装配里的回收器是<b>关掉的</b>：这些用例断言的是「执行与确认」那段逻辑，
+     * 不该顺带在磁盘上删东西。回收自身的判据由 {@code WorkspaceCleanerTest} 覆盖，
+     * 「消费一轮会触发回收」这条接线由 {@link #expiredSandboxIsReclaimedOnProcessOnce} 覆盖。
+     */
+    private WorkspaceCleaner cleanupDisabled() {
+        return new WorkspaceCleaner(Path.of(".unused-workspaces"), Duration.ofHours(24), false,
+                Duration.ofMinutes(30), store, Clock.systemUTC());
     }
 
     /** 用桩件替掉真正的调度器：只记录被调用的任务 id，行为由用例注入。 */
     private DagScheduler scheduler() {
-        // 第 5 参 requirePlanApproval=false：本用例只验「消费 → 调调度器」这段，不涉及人工评审
-        CoreProperties coreProperties = new CoreProperties(2, List.of("test"), ".unused", false, false);
+        // 后两个开关（requirePlanApproval / requireRewriteApproval）=false：本用例只验「消费 → 调调度器」
+        // 这段，不涉及人工评审与门禁；沙箱回收的开关与保留期取默认（开启 / 24h，本处用不到）
+        CoreProperties coreProperties = new CoreProperties(2, List.of("test"), ".unused",
+                false, false, false, true, Duration.ofHours(24));
         return new DagScheduler(store, coreProperties, new JsonCodec(), List.of(),
                 publishers(ProgressPublisher.NOOP)) {
             @Override

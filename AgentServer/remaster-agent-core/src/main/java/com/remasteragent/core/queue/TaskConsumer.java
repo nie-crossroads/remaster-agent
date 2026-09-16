@@ -4,6 +4,7 @@ import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.TaskStatus;
 import com.remasteragent.core.engine.DagScheduler;
 import com.remasteragent.core.store.TaskStore;
+import com.remasteragent.core.workspace.WorkspaceCleaner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,8 +20,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <h2>循环结构</h2>
  * <pre>
- *   启动 → 建消费组 → 重置上次被杀的残留节点 → 循环 { 接管遗留消息 → 取新消息 → 执行 → 确认 }
+ *   启动 → 建消费组 → 重置上次被杀的残留节点 → 循环 { 回收过期沙箱 → 接管遗留消息 → 取新消息 → 执行 → 确认 }
  * </pre>
+ *
+ * <p>「回收过期沙箱」（{@link WorkspaceCleaner}）挂在这里，是因为沙箱的创建者就是执行任务的
+ * 那个进程 —— 本循环在两个部署形态下各自唯一存在（双进程时属于 Worker，内嵌时属于 API），
+ * 拿它当定时触发点，回收天然只有一个执行者。详见 {@link WorkspaceCleaner} 的类注释。
  *
  * <p><b>单线程、一次一个任务</b>。这不是偷懒：一个迁移任务本身就是几十秒到几分钟的
  * 顺序过程（分析 → 改写 → 编译 → 跑测试），并发跑多个任务只会让它们在同一个 Maven
@@ -39,16 +44,18 @@ public class TaskConsumer implements AutoCloseable {
     private final TaskStore taskStore;
     private final DagScheduler scheduler;
     private final QueueProperties properties;
+    private final WorkspaceCleaner workspaceCleaner;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile Thread loopThread;
 
     public TaskConsumer(TaskQueue queue, TaskStore taskStore, DagScheduler scheduler,
-                        QueueProperties properties) {
+                        QueueProperties properties, WorkspaceCleaner workspaceCleaner) {
         this.queue = queue;
         this.taskStore = taskStore;
         this.scheduler = scheduler;
         this.properties = properties;
+        this.workspaceCleaner = workspaceCleaner;
     }
 
     /**
@@ -105,18 +112,23 @@ public class TaskConsumer implements AutoCloseable {
     }
 
     /**
-     * 执行一轮消费：先接管遗留消息，再取新消息，逐条处理。
+     * 执行一轮消费：先回收过期沙箱，再接管遗留消息，最后取新消息，逐条处理。
      *
      * <p>把「一轮」从「循环」里拆出来，是为了让这段真正有决策逻辑的代码
      * 能被<b>同步地</b>单测 —— 循环只是调度它，真正的判断（要不要跑、要不要确认）
      * 都在这里。若只能通过启动线程来测，断言就必须依赖 sleep 和轮询，
-     * 那是一种会随机变红的测试，比没有测试更糟。
+     * 那是一种会随机变红的测试，比没有测试更糟。沙箱回收也放在这里而不是 {@code loop()}
+     * 里，同样是这个理由。
      *
      * <p>顺序上先接管遗留消息：它们更老，先处理才能让任务大致按投递顺序推进。
      *
      * @return 本轮处理的条数，供循环判断是否需要退让
      */
     int processOnce() {
+        // 回收过期沙箱（内部按 30 分钟节流，且永不抛异常）。放在最前面：
+        // 它与队列状态无关，首次调用会立即扫一次 —— Worker 一启动就顺手清掉历史残骸。
+        workspaceCleaner.sweepIfDue();
+
         int handled = process(queue.reclaimAbandoned());
         handled += process(queue.poll());
         return handled;

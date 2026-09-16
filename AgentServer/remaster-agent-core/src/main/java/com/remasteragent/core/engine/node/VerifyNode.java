@@ -86,7 +86,7 @@ public class VerifyNode implements NodeExecutor {
 
         String feedback = buildFailureFeedback(verify);
         warnIfFeedbackIsBlind(verify);
-        return new NodeOutcome(false, verify, feedback);
+        return NodeOutcome.fail(verify, feedback);
     }
 
     /**

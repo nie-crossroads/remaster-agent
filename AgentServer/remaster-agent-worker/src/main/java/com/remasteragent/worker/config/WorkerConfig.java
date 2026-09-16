@@ -5,6 +5,7 @@ import com.remasteragent.core.queue.QueueProperties;
 import com.remasteragent.core.queue.TaskConsumer;
 import com.remasteragent.core.queue.TaskQueue;
 import com.remasteragent.core.store.TaskStore;
+import com.remasteragent.core.workspace.WorkspaceCleaner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -24,7 +25,8 @@ public class WorkerConfig {
 
     @Bean(initMethod = "start", destroyMethod = "close")
     public TaskConsumer taskConsumer(TaskQueue queue, TaskStore taskStore,
-                                     DagScheduler scheduler, QueueProperties properties) {
-        return new TaskConsumer(queue, taskStore, scheduler, properties);
+                                     DagScheduler scheduler, QueueProperties properties,
+                                     WorkspaceCleaner workspaceCleaner) {
+        return new TaskConsumer(queue, taskStore, scheduler, properties, workspaceCleaner);
     }
 }

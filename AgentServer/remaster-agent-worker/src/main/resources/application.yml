@@ -53,12 +53,31 @@ remaster:
     # 最多 2 次重试 = 最多 3 轮改写。每次重试都是一次完整「调模型 + 跑沙箱」，
     # 超过 3 轮通常说明问题不在模型的随机性，而在工程本身，继续只是烧钱
     max-rewrite-attempts: 2
-    workspace-root: .remaster-workspaces
+    # 沙箱根目录：每个任务一个子目录（task-<id>），源工程只读 —— 改写只落在副本上。
+    # 必须是【绝对路径】：相对路径按「进程工作目录」解析，换个目录启动就会另起一份
+    # （本项目实测因此分裂出 4 份，同名 task-N 还互不相干）。启动日志会打印解析后的真实路径。
+    # 部署到服务器时改本项，或设环境变量 REMASTER_WORKSPACE_ROOT 覆盖，无需改代码。
+    # 用正斜杠，Windows / Linux 通用。
+    workspace-root: ${REMASTER_WORKSPACE_ROOT:E:/AITools/WorkBuddy/workspace/langchain-agent-java/.remaster-workspaces}
     # true = PLAN 成功后把任务挂到 WAITING_HUMAN，等人工在评审界面批准再继续。
     # 默认 false（自动执行）—— 这是「规划人工评审」的开关，验收该能力时置 true。
     # 注意：批准入口在 API 进程（POST /api/tasks/{id}/plan/approve），两个进程读同一个开关，
     # 但只有 Worker 会真的去挂起，所以这个值以 Worker 的配置为准。
     require-plan-approval: ${REMASTER_REQUIRE_PLAN_APPROVAL:false}
+    # true = 每个文件改写后插入一道 GATE 门禁，挂到 WAITING_HUMAN 等人工看一眼补丁再验证
+    # （链条变成 REWRITE → GATE → VERIFY）。默认 false（改完直接验证）—— 这是「通用人在回路」
+    # 的开关，验收该能力时置 true。与上一项的区别是粒度：plan 是任务级一次性，本项是每文件一道。
+    # 批准/驳回入口在 API 进程（POST /api/tasks/{id}/gate/approve | /gate/reject）。
+    require-rewrite-approval: ${REMASTER_REQUIRE_REWRITE_APPROVAL:false}
+    # 沙箱回收：任务到达终态（SUCCEEDED/FAILED）满保留期后，其 task-<id> 目录被【永久删除】。
+    # 为什么要留窗口期而不是跑完就删：刚结束那一刻恰恰最需要现场（看改写结果、查失败原因）。
+    # 判据是任务的终态时刻（migration_task.updated_at），库里查不到的孤儿目录按目录 mtime 判。
+    # 运行中 / 等待人工（WAITING_HUMAN）的任务一律不碰。回收由本进程的消费循环触发（30 分钟一次），
+    # 所以双进程部署时只有 Worker 在扫、内嵌模式时只有 API 在扫 —— 天然单实例，无需分布式锁。
+    # 置 false 可整体关掉（排查问题想留全量沙箱时）。
+    workspace-cleanup-enabled: ${REMASTER_WORKSPACE_CLEANUP_ENABLED:true}
+    # 支持 24h / 30m / 7d / PT24H 等写法，默认 24 小时。配成 0 或负数会被当成「没配」回落到默认值。
+    workspace-retention: ${REMASTER_WORKSPACE_RETENTION:24h}
 
   # 代码 RAG（阶段 2 理解层）。enabled=false 可整体关闭检索，是最省钱的降级开关。
   rag:

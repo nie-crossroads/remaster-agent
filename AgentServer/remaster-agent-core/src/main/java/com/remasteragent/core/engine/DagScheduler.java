@@ -3,6 +3,7 @@ package com.remasteragent.core.engine;
 import com.remasteragent.common.agent.RewriteResult;
 import com.remasteragent.common.agent.VerifyResult;
 import com.remasteragent.common.domain.DagNode;
+import com.remasteragent.common.domain.HumanGate;
 import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
@@ -12,6 +13,7 @@ import com.remasteragent.common.domain.TaskStatus;
 import com.remasteragent.core.codec.JsonCodec;
 import com.remasteragent.core.config.CoreProperties;
 import com.remasteragent.core.engine.node.AnalyzeNode;
+import com.remasteragent.core.engine.node.GateNode;
 import com.remasteragent.core.engine.node.PlanNode;
 import com.remasteragent.core.engine.node.RewriteNode;
 import com.remasteragent.core.engine.node.VerifyNode;
@@ -80,6 +82,27 @@ public class DagScheduler {
         this.progressPublisher = publisherProvider.getIfAvailable(() -> ProgressPublisher.NOOP);
         nodeExecutors.forEach(executor -> this.executors.put(executor.type(), executor));
         log.info("调度器已装配节点执行器: {}", this.executors.keySet());
+        logSandboxRoot();
+    }
+
+    /**
+     * 启动时把沙箱根目录固化到日志里。
+     *
+     * <p>为什么值得单独打一条：沙箱根若配成相对路径，会按<b>进程工作目录</b>解析 ——
+     * 从不同目录启动就各生成一份，且彼此的同名 {@code task-N} 互不相干。真发生时表现为
+     * 「文件明明改了却找不到」或「打开了上一批的过期副本」，而现场早已过去。
+     * 启动时打出解析结果，下一眼就能确认「这次跑的是哪一份」。
+     */
+    private void logSandboxRoot() {
+        Path root = properties.workspaceRootPath();
+        if (properties.workspaceRootIsAbsolute()) {
+            log.info("沙箱根目录: {}", root);
+        } else {
+            log.warn("沙箱根目录配成了相对路径 [{}] —— 解析为 {}，取决于进程工作目录（当前 cwd={}）。"
+                            + "换个目录启动会另起一份沙箱、同名任务目录互相覆盖。"
+                            + "请改为绝对路径，或用环境变量 REMASTER_WORKSPACE_ROOT 覆盖。",
+                    properties.workspaceRoot(), root, System.getProperty("user.dir"));
+        }
     }
 
     /**
@@ -109,6 +132,10 @@ public class DagScheduler {
                     // 挂起不是完成：直接返回，不走 finalizeTask。批准后重新入队，从 checkpoint 续跑
                     return;
                 }
+                if (pauseForGateIfNeeded(task)) {
+                    // 通用 GATE 门禁正在等人工：同样挂起不占 Worker，批准后从 checkpoint 续跑
+                    return;
+                }
                 List<DagNode> runnable = taskStore.findRunnable(taskId);
                 if (runnable.isEmpty()) {
                     break;
@@ -119,7 +146,11 @@ public class DagScheduler {
                     throw new IllegalStateException("调度轮次异常增长，疑似 DAG 出现环");
                 }
                 for (DagNode node : runnable) {
-                    executeNode(task, node, workspace);
+                    if (executeNode(task, node, workspace)) {
+                        // 本节点挂起（GATE 门禁）：立刻返回，既不再跑同批的其它节点，
+                        // 也不走 finalizeTask —— 挂起不是完成
+                        return;
+                    }
                 }
             }
 
@@ -166,21 +197,47 @@ public class DagScheduler {
 
         long rewriteId = taskStore.insertNode(taskId, RewriteNode.NODE_KEY, NodeType.REWRITE,
                 List.of(analyzeId), 0);
-        taskStore.insertNode(taskId, VerifyNode.NODE_KEY, NodeType.VERIFY, List.of(rewriteId), 0);
-        log.info("初始 DAG 已铺开，共 {} 个节点: ANALYZE → REWRITE → VERIFY",
-                taskStore.findNodes(taskId).size());
+
+        // 门禁开启时把 VERIFY 挂到 GATE 之后，而不是直接挂 REWRITE：
+        // 改完先停下等人看一眼补丁，批准后才进沙箱验证
+        long verifyDependency = rewriteId;
+        String topology = "ANALYZE → REWRITE → VERIFY";
+        if (gateEnabled()) {
+            verifyDependency = taskStore.insertNode(taskId, GateNode.NODE_KEY, NodeType.GATE,
+                    List.of(rewriteId), 0);
+            topology = "ANALYZE → REWRITE → GATE → VERIFY";
+        }
+        taskStore.insertNode(taskId, VerifyNode.NODE_KEY, NodeType.VERIFY, List.of(verifyDependency), 0);
+
+        log.info("初始 DAG 已铺开，共 {} 个节点: {}", taskStore.findNodes(taskId).size(), topology);
+    }
+
+    /**
+     * 是否启用「改写后人工门禁」。
+     *
+     * <p>判据是<b>开关 + 执行器都存在</b>，与本类选择拓扑的既有原则一致：
+     * 配了开关但没装配 {@code GateNode} 时自动退化，不铺出无法执行的节点。
+     */
+    private boolean gateEnabled() {
+        return properties.requireRewriteApproval() && executors.containsKey(NodeType.GATE);
     }
 
     // ------------------------------------------------------------------
     // 节点执行
     // ------------------------------------------------------------------
 
-    private void executeNode(MigrationTask task, DagNode node, Path workspace) {
+    /**
+     * 执行一个节点。
+     *
+     * @return {@code true} 表示该节点<b>挂起</b>（GATE 门禁在等人工）——
+     *         调用方应立即返回，不要继续跑同批其它节点，也不要走 finalizeTask
+     */
+    private boolean executeNode(MigrationTask task, DagNode node, Path workspace) {
         NodeExecutor executor = executors.get(node.nodeType());
         if (executor == null) {
             log.error("没有节点类型 {} 的执行器，标记失败", node.nodeType());
             taskStore.markNodeFailed(node.id(), "没有可用的节点执行器: " + node.nodeType(), null);
-            return;
+            return false;
         }
 
         log.info("▶ 执行节点 [{}] attempt={} type={}", node.nodeKey(), node.attempt(), node.nodeType());
@@ -199,12 +256,16 @@ public class DagScheduler {
             outcome = NodeOutcome.fail("节点执行异常: " + e);
         }
 
+        if (outcome.suspended()) {
+            return suspendForGate(task, node, outcome);
+        }
+
         if (outcome.success()) {
             taskStore.markNodeSucceeded(node.id(), json.write(outcome.result()));
             log.info("✔ 节点 [{}] attempt={} 成功", node.nodeKey(), node.attempt());
             publish(ProgressEvent.nodeStatus(task.id(), node.id(), node.nodeKey(),
                     NodeStatus.SUCCEEDED.name(), node.attempt(), describe(node)));
-            return;
+            return false;
         }
 
         taskStore.markNodeFailed(node.id(), outcome.error(), json.write(outcome.result()));
@@ -213,6 +274,30 @@ public class DagScheduler {
                 NodeStatus.FAILED.name(), node.attempt(), trim(outcome.error(), 200)));
 
         planRetry(task, node, outcome);
+        return false;
+    }
+
+    /**
+     * GATE 门禁挂起 —— 把任务停在 WAITING_HUMAN，等人放行。
+     *
+     * <p>节点退回 PENDING 而非留在 RUNNING：它没跑完，也不该被
+     * {@code resetStaleRunningNodes}（Worker 重启的全局清残骸）当成残留再动一次。
+     * 真正阻止它被重复执行的是 {@link #pauseForGateIfNeeded}，不是这个状态。
+     *
+     * <p>挂起与阶段 2 的规划评审共用 {@code WAITING_HUMAN} 这个任务状态，
+     * 但两者的解除入口不同（{@code /plan/approve} vs {@code /gate/approve}），
+     * 由「是否存在等待中的 human_gate 行」区分。
+     */
+    private boolean suspendForGate(MigrationTask task, DagNode node, NodeOutcome outcome) {
+        taskStore.markNodePending(node.id());
+        taskStore.updateTaskStatus(task.id(), TaskStatus.WAITING_HUMAN, null);
+
+        String message = suspendMessage(outcome, node);
+        publish(ProgressEvent.nodeStatus(task.id(), node.id(), node.nodeKey(),
+                NodeStatus.PENDING.name(), node.attempt(), message));
+        publish(ProgressEvent.taskStatus(task.id(), TaskStatus.WAITING_HUMAN.name(), message));
+        log.info("⏸ 任务 #{} 已挂起等待人工门禁（节点 {}）", task.id(), node.nodeKey());
+        return true;
     }
 
     /**
@@ -251,13 +336,12 @@ public class DagScheduler {
         String filePath = keySuffix(failedNode.nodeKey());
 
         if (failedNode.nodeType() == NodeType.REWRITE) {
-            taskStore.findNode(task.id(), verifyKey(filePath), failedNode.attempt())
-                    .filter(verify -> verify.status() == NodeStatus.PENDING
-                            || verify.status() == NodeStatus.RUNNING)
-                    .ifPresent(verify -> {
-                        taskStore.markNodeSkipped(verify.id(), "上游 REWRITE 失败，本轮终止");
-                        log.info("已跳过本轮 VERIFY 节点（上游重写失败）");
-                    });
+            // 本轮的下游全部作废：门禁（若开了）与 VERIFY 都永远等不到这次 REWRITE 成功，
+            // 不显式跳过就会在 DAG 上留下两个永远 PENDING 的悬挂节点
+            skipIfPending(task.id(), gateKey(filePath), failedNode.attempt(),
+                    "上游 REWRITE 失败，本轮门禁已跳过");
+            skipIfPending(task.id(), verifyKey(filePath), failedNode.attempt(),
+                    "上游 REWRITE 失败，本轮终止");
         }
 
         long baseId = baseDependencyId(task.id());
@@ -266,11 +350,25 @@ public class DagScheduler {
         taskStore.insertNode(task.id(), verifyKey(filePath), NodeType.VERIFY,
                 List.of(rewriteId), nextAttempt);
 
+        // 说明：回退轮<b>不再插入门禁</b>。门禁只作用于 PLAN 规划出的首轮改写 ——
+        // 回退是模型的自动纠错，逐轮拦住人要审批会让人在「反复确认同一类小错」里疲劳；
+        // 首轮那道门已经给了人「看一眼这次迁移靠不靠谱」的机会，够了。
         log.info("↻ 已派生第 {} 轮重写（attempt={} 文件={}），失败反馈 {} 字",
                 nextAttempt + 1, nextAttempt, filePath == null ? "(入口文件)" : filePath,
                 outcome.error() == null ? 0 : outcome.error().length());
         publish(ProgressEvent.taskStatus(task.id(), TaskStatus.RUNNING.name(),
                 "第 " + (nextAttempt + 1) + " 轮重写已排入队列"));
+    }
+
+    /** 把某个仍处于 PENDING/RUNNING 的节点标记为 SKIPPED（已是终态则不动）。 */
+    private void skipIfPending(long taskId, String nodeKey, int attempt, String reason) {
+        taskStore.findNode(taskId, nodeKey, attempt)
+                .filter(node -> node.status() == NodeStatus.PENDING
+                        || node.status() == NodeStatus.RUNNING)
+                .ifPresent(node -> {
+                    taskStore.markNodeSkipped(node.id(), reason);
+                    log.info("已跳过节点 [{}] attempt={}：{}", nodeKey, attempt, reason);
+                });
     }
 
     /**
@@ -312,9 +410,7 @@ public class DagScheduler {
      */
     private Path restoreWorkspace(MigrationTask task) {
         Path sourceRoot = Paths.get(task.projectRoot()).toAbsolutePath().normalize();
-        Path workspace = Paths.get(properties.workspaceRoot())
-                .toAbsolutePath().normalize()
-                .resolve("task-" + task.id());
+        Path workspace = properties.workspaceRootPath().resolve("task-" + task.id());
 
         WorkspacePreparer.prepare(sourceRoot, workspace);
         replaySucceededRewrites(task.id(), workspace);
@@ -490,6 +586,39 @@ public class DagScheduler {
         return true;
     }
 
+    /**
+     * 通用 GATE 门禁的挂起判据（阶段 3）—— 与规划评审并列的第二道「人在回路」。
+     *
+     * <p>判据极其简单：<b>库里存在一道 PENDING 的 human_gate</b> 就挂起。
+     * 它在调度循环的每一轮开头检查，覆盖三种情形：
+     * <ol>
+     *   <li>首轮执行到 GATE 节点 → {@code GateNode} 落行并返回挂起，任务已是 WAITING_HUMAN；</li>
+     *   <li>批准前的重复投递 / Worker 重启重入队 → 门还在，这里直接拦住，
+     *       不会越过它去跑下游，也不会重复执行 GATE 节点落第二行；</li>
+     *   <li>批准后重入队 → 门已是 APPROVED，{@code findOpenGate} 返回空，正常继续。</li>
+     * </ol>
+     *
+     * <p>用「库里有没有等待中的门」而不是「节点是不是 GATE 类型」作判据，
+     * 是因为前者的真值来源唯一（human_gate 表），且天然覆盖了「门已被批准、该放行」
+     * 这个相反方向；后者需要额外判断门的审批状态，反而更容易写错。
+     *
+     * @return true 表示已挂起，调用方应立刻返回而不走 finalizeTask
+     */
+    private boolean pauseForGateIfNeeded(MigrationTask task) {
+        Optional<HumanGate> openGate = taskStore.findOpenGate(task.id());
+        if (openGate.isEmpty()) {
+            return false;
+        }
+        if (task.status() != TaskStatus.WAITING_HUMAN) {
+            // 只有状态还没反映出来时才推事件，避免重入队时把同一条挂起消息刷屏
+            taskStore.updateTaskStatus(task.id(), TaskStatus.WAITING_HUMAN, null);
+            publish(ProgressEvent.taskStatus(task.id(), TaskStatus.WAITING_HUMAN.name(),
+                    "等待人工门禁审批（gate #" + openGate.get().id() + "）"));
+        }
+        log.info("任务 #{} 仍有一道待审批门禁 gate #{}，保持挂起", task.id(), openGate.get().id());
+        return true;
+    }
+
     /** 取节点键中 ':' 之后的部分（文件路径）；裸键（隐式单文件模式）返回 null。 */
     private static String keySuffix(String nodeKey) {
         if (nodeKey == null) {
@@ -506,6 +635,19 @@ public class DagScheduler {
 
     private static String verifyKey(String filePath) {
         return filePath == null ? VerifyNode.NODE_KEY : VerifyNode.nodeKey(filePath);
+    }
+
+    /** 门禁节点键：与 rewrite/verify 同款——有文件用带文件的键，否则退回裸键。 */
+    private static String gateKey(String filePath) {
+        return filePath == null ? GateNode.NODE_KEY : GateNode.nodeKey(filePath);
+    }
+
+    /** 把挂起现场翻成一句能展示给用户的话。 */
+    private static String suspendMessage(NodeOutcome outcome, DagNode node) {
+        if (outcome.result() instanceof GateNode.GateSuspend gate && gate.message() != null) {
+            return gate.message();
+        }
+        return "已挂起等待人工审批（节点 " + node.nodeKey() + "）";
     }
 
     /**

@@ -1,6 +1,8 @@
 package com.remasteragent.core.store;
 
 import com.remasteragent.common.domain.DagNode;
+import com.remasteragent.common.domain.GateStatus;
+import com.remasteragent.common.domain.HumanGate;
 import com.remasteragent.common.domain.LlmCallRecord;
 import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
@@ -41,10 +43,12 @@ public final class InMemoryTaskStore implements TaskStore {
     private final List<PatchRecord> patches = new ArrayList<>();
     private final List<LlmCallRecord> llmCalls = new ArrayList<>();
     private final Set<Long> approvedPlans = new java.util.LinkedHashSet<>();
+    private final Map<Long, HumanGate> gates = new LinkedHashMap<>();
 
     private long taskSeq = 0;
     private long nodeSeq = 0;
     private long patchSeq = 0;
+    private long gateSeq = 0;
 
     // ------------------------------------------------------------------
     // 任务
@@ -113,6 +117,50 @@ public final class InMemoryTaskStore implements TaskStore {
     }
 
     // ------------------------------------------------------------------
+    // 人工门禁（阶段 3）
+    // ------------------------------------------------------------------
+
+    @Override
+    public long insertGate(long nodeId, String comment) {
+        long id = ++gateSeq;
+        gates.put(id, new HumanGate(id, nodeId, GateStatus.PENDING, null, comment, Instant.now(), null));
+        return id;
+    }
+
+    @Override
+    public Optional<HumanGate> findOpenGate(long taskId) {
+        Set<Long> nodeIds = findNodes(taskId).stream().map(DagNode::id).collect(Collectors.toSet());
+        return gates.values().stream()
+                .filter(gate -> gate.status() == GateStatus.PENDING && nodeIds.contains(gate.nodeId()))
+                .max(Comparator.comparing(HumanGate::id));
+    }
+
+    @Override
+    public Optional<HumanGate> findGate(long gateId) {
+        return Optional.ofNullable(gates.get(gateId));
+    }
+
+    @Override
+    public List<HumanGate> findGates(long taskId) {
+        Set<Long> nodeIds = findNodes(taskId).stream().map(DagNode::id).collect(Collectors.toSet());
+        return gates.values().stream()
+                .filter(gate -> nodeIds.contains(gate.nodeId()))
+                .sorted(Comparator.comparing(HumanGate::id))
+                .toList();
+    }
+
+    @Override
+    public int decideGate(long gateId, GateStatus status, String reviewer, String comment) {
+        HumanGate current = gates.get(gateId);
+        if (current == null || current.status() != GateStatus.PENDING) {
+            return 0;
+        }
+        gates.put(gateId, new HumanGate(current.id(), current.nodeId(), status, reviewer,
+                comment, current.createdAt(), Instant.now()));
+        return 1;
+    }
+
+    // ------------------------------------------------------------------
     // 节点
     // ------------------------------------------------------------------
 
@@ -156,6 +204,11 @@ public final class InMemoryTaskStore implements TaskStore {
     @Override
     public void markNodeRunning(long nodeId) {
         replace(nodeId, node -> with(node, NodeStatus.RUNNING, node.resultJson(), node.error()));
+    }
+
+    @Override
+    public void markNodePending(long nodeId) {
+        replace(nodeId, node -> with(node, NodeStatus.PENDING, node.resultJson(), node.error()));
     }
 
     @Override

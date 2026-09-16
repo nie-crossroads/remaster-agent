@@ -3,6 +3,7 @@ package com.remasteragent.core.engine.node;
 import com.remasteragent.common.agent.PlanResult;
 import com.remasteragent.common.domain.LlmCallRecord;
 import com.remasteragent.common.domain.NodeType;
+import com.remasteragent.core.config.CoreProperties;
 import com.remasteragent.core.engine.NodeContext;
 import com.remasteragent.core.engine.NodeExecutor;
 import com.remasteragent.core.engine.NodeOutcome;
@@ -61,13 +62,16 @@ public class PlanNode implements NodeExecutor {
     private final TaskStore taskStore;
     private final MigrationPlanner planner;
     private final LlmProperties llmProperties;
+    private final CoreProperties coreProperties;
     private final ProgressPublisher progressPublisher;
 
     /** 单测入口：不发布进度。 */
-    public PlanNode(TaskStore taskStore, MigrationPlanner planner, LlmProperties llmProperties) {
+    public PlanNode(TaskStore taskStore, MigrationPlanner planner, LlmProperties llmProperties,
+                    CoreProperties coreProperties) {
         this.taskStore = taskStore;
         this.planner = planner;
         this.llmProperties = llmProperties;
+        this.coreProperties = coreProperties;
         this.progressPublisher = ProgressPublisher.NOOP;
     }
 
@@ -77,10 +81,12 @@ public class PlanNode implements NodeExecutor {
      */
     @Autowired
     public PlanNode(TaskStore taskStore, MigrationPlanner planner, LlmProperties llmProperties,
+                    CoreProperties coreProperties,
                     ObjectProvider<ProgressPublisher> publisherProvider) {
         this.taskStore = taskStore;
         this.planner = planner;
         this.llmProperties = llmProperties;
+        this.coreProperties = coreProperties;
         this.progressPublisher = publisherProvider == null
                 ? ProgressPublisher.NOOP
                 : publisherProvider.getIfAvailable(() -> ProgressPublisher.NOOP);
@@ -126,13 +132,23 @@ public class PlanNode implements NodeExecutor {
         }
 
         long planNodeId = context.node().id();
+        // 门禁开启时，每个文件的链条铺成 REWRITE → GATE → VERIFY：
+        // 改完先停下等人看一眼补丁，批准后才进沙箱验证。
+        // GATE 节点与 REWRITE/VERIFY 一样在**运行期**插入，随后由调度循环发现并执行。
+        boolean gate = coreProperties != null && coreProperties.requireRewriteApproval();
         for (String filePath : targets) {
             long rewriteId = taskStore.insertNode(context.task().id(),
                     RewriteNode.nodeKey(filePath), NodeType.REWRITE, List.of(planNodeId), 0);
+            long verifyDependency = rewriteId;
+            if (gate) {
+                verifyDependency = taskStore.insertNode(context.task().id(),
+                        GateNode.nodeKey(filePath), NodeType.GATE, List.of(rewriteId), 0);
+            }
             taskStore.insertNode(context.task().id(),
-                    VerifyNode.nodeKey(filePath), NodeType.VERIFY, List.of(rewriteId), 0);
+                    VerifyNode.nodeKey(filePath), NodeType.VERIFY, List.of(verifyDependency), 0);
         }
-        log.info("规划完成: {} 个文件待迁移 → {}", targets.size(), targets);
+        log.info("规划完成: {} 个文件待迁移 → {}（门禁 {}）",
+                targets.size(), targets, gate ? "开启" : "关闭");
 
         return NodeOutcome.ok(effectivePlan(outcome.plan(), targets));
     }
