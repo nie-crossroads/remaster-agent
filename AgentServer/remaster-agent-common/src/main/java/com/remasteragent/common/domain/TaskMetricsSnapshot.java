@@ -36,7 +36,7 @@ package com.remasteragent.common.domain;
  * @param llmCalls         LLM 调用总次数
  * @param promptTokens     prompt token 总量
  * @param completionTokens completion token 总量
- * @param totalCost        总成本（美元；前端按 ¥ 展示，见 DATA_MODEL.md 的注释漂移记录）
+ * @param totalCost        总成本（元）
  * @param verifyAttempts   VERIFY 执行次数，>1 说明发生过回退重写
  * @param retried          是否发生过回退（{@code verifyAttempts > 1}）
  * @param durationMs       端到端耗时

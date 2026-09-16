@@ -26,6 +26,7 @@
     <module>remaster-agent-core</module>
     <module>remaster-agent-web</module>
     <module>remaster-agent-worker</module>
+    <module>remaster-agent-eval</module>
   </modules>
 
   <properties>

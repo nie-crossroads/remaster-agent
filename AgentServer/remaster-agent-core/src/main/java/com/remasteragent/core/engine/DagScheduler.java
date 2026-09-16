@@ -666,8 +666,8 @@ public class DagScheduler {
                 task.createdAt() == null ? Instant.now() : task.createdAt(), Instant.now()).toMillis();
 
         return new TaskMetrics(
-                1,
-                verify != null && verify.compiled() ? 1 : 0,
+                countRewriteTargets(nodes, lastVerify),
+                verify != null && verify.compiled() ? countRewriteTargets(nodes, lastVerify) : 0,
                 verify == null ? 0 : verify.testsTotal(),
                 verify == null ? 0 : verify.testsPassed(),
                 verify == null ? -1d : verify.coverage(),
@@ -677,6 +677,31 @@ public class DagScheduler {
                 cost.totalCost(),
                 taskStore.countVerifyRounds(task.id()),
                 durationMs);
+    }
+
+    /**
+     * 参与迁移的文件数 = 去重后的 REWRITE 目标数。
+     *
+     * <p>早先这里硬编码 1（阶段 1 只改一个文件的遗留）。PLAN 现在可以为一次任务规划
+     * 多个文件（实测 {@code inventory-legacy} 一次规划了 4 个），于是「编译通过率」
+     * 会永远显示 1/1 —— 分母是假的分母，比率再好看也没有意义。
+     *
+     * <p>没有 REWRITE 节点时：有 VERIFY 说明走过隐式单文件路径，回落 1；
+     * 否则是 0（什么都没改写），不能顺手报 1 —— 那会让「没跑起来」显示成「100% 之外的失败」。
+     */
+    private int countRewriteTargets(List<DagNode> nodes, DagNode lastVerify) {
+        long targets = nodes.stream()
+                .filter(node -> node.nodeType() == NodeType.REWRITE)
+                .map(node -> {
+                    String suffix = keySuffix(node.nodeKey());
+                    return suffix == null ? "" : suffix;
+                })
+                .distinct()
+                .count();
+        if (targets > 0) {
+            return (int) targets;
+        }
+        return lastVerify == null ? 0 : 1;
     }
 
     private VerifyResult parseVerifyResult(DagNode node) {

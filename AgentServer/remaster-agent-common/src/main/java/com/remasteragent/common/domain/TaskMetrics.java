@@ -14,7 +14,7 @@ package com.remasteragent.common.domain;
  * @param llmCalls         LLM 调用总次数
  * @param promptTokens     prompt token 总量
  * @param completionTokens completion token 总量
- * @param totalCost        总成本（美元）
+ * @param totalCost        总成本（元）
  * @param verifyAttempts   VERIFY 节点执行次数，>1 说明发生过回退重写
  * @param durationMs       端到端耗时
  */

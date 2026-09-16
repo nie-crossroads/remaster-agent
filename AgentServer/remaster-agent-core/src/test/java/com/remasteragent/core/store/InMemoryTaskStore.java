@@ -286,9 +286,12 @@ public final class InMemoryTaskStore implements TaskStore {
 
     @Override
     public int countVerifyRounds(long taskId) {
-        return (int) findNodes(taskId).stream()
+        // 与 JdbcTaskStore 同一口径：轮次 = 最大 attempt + 1，不是节点总数
+        return findNodes(taskId).stream()
                 .filter(node -> node.nodeType() == NodeType.VERIFY)
-                .count();
+                .mapToInt(DagNode::attempt)
+                .max()
+                .orElse(-1) + 1;
     }
 
     @Override

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.remasteragent</groupId>
+    <artifactId>remaster-agent-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>remaster-agent-eval</artifactId>
+  <name>remaster-agent-eval</name>
+  <description>
+    评测 harness：批量提交样本、采集指标、渲染量化报告。
+    刻意做成 Maven 模块而不是脚本 —— 聚合公式（加权通过率、P90 耗时、一次通过率）
+    是这个项目里最需要也最容易单测的部分，给它一个 List&lt;EvalRun&gt; 就能断言，
+    不需要数据库、不需要模型、不需要 Maven。
+  </description>
+
+  <dependencies>
+    <!--
+      只依赖 common（拿 TaskMetrics / TaskStatus 这些「指标语义」的定义）。
+      刻意不依赖 core / web：
+        - core 会拖进 spring-jdbc、Redis、OTel —— 评测工具用不到；
+        - web 是个 Spring Boot 应用，把它当库依赖会连带把整个 Web 栈拉进来。
+      与 API 的交互走 HTTP（java.net.http），与数据库的交互（collect 子命令）走
+      隔离在 dao 包里的一小块 JDBC —— 只读，不参与业务。
+    -->
+    <dependency>
+      <groupId>com.remasteragent</groupId>
+      <artifactId>remaster-agent-common</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.dataformat</groupId>
+      <artifactId>jackson-dataformat-yaml</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!--
+        跑评测：mvn -o -pl remaster-agent-eval exec:java "-Dexec.args=baseline"
+        不配置 mainClass 的默认值是为了让不带参数的 exec:java 直接报错而不是猜。
+      -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <configuration>
+          <mainClass>com.remasteragent.eval.EvalMain</mainClass>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

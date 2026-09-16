@@ -120,12 +120,12 @@ body {
 }
 
 .section-title {
-  font-size: 13px;
+  font-size: 18px;
   font-weight: 600;
-  color: var(--text-muted);
+  color: var(--text-primary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  margin: 16px 0 8px;
+  margin: 0 0 8px;
 }
 
 .card {

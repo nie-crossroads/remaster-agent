@@ -1,0 +1,369 @@
+# RemasterAgent 迁移评测集 —— 用例清单
+#
+# 这个文件是评测集的「唯一事实来源」：harness 只认它，报告里的分母也由它决定。
+# 每条用例 = 一个迁移任务 = 一个（工程, 目标文件）二元组。
+#
+# 字段：
+#   id          唯一标识，报告里作为行的主键，也用于 --case=<id> 指定单跑
+#   project     工程根目录，相对仓库根，必须含 pom.xml
+#   entryFile   目标文件，相对 project，必须以 .java 结尾
+#   targetJdk   目标 JDK 版本
+#   expect      期望结局：SUCCEEDED / FAILED
+#   ready       true = 样本已就绪可跑；false = 计划中（B2 补），harness 会跳过并计入「未就绪」
+#   title       一句话说明这条用例在考什么
+#   patterns    覆盖的遗留模式标签（报告按标签分组，验证「哪类改动最难」）
+#   notes       样本设计上的关键约束，写给维护者看
+#
+# 口径纪律：验收标准里的「≥ 20 个可迁移目标」只统计 ready: true 的条目。
+# 把「计划」和「就绪」分开记，是为了避免「条目数够了但其实跑不了」这种自欺。
+
+version: 1
+
+cases:
+
+  # ==================================================================
+  # billing-legacy —— 计费域（B1 已就绪）
+  # ==================================================================
+  # 硬约束（见 docs/PHASE4_EVAL_DESIGN.md §2.3）：同工程内四个类互不调用，
+  # 每个测试类只测自己。因为 VERIFY 跑的是全工程 mvn test，
+  # 一旦 A 类的改写会影响 B 类的单测，A 就会被判失败 —— 那是样本的锅，不是 Agent 的。
+
+  - id: billing-invoice-calculator
+    project: examples/eval/billing-legacy
+    entryFile: src/main/java/com/example/billing/InvoiceCalculator.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 金额精度（内部 double → BigDecimal）与显式装箱
+    patterns: [money-double, boxing, explicit-generics, index-loop, string-concat]
+    notes: >
+      金额的对外表示刻意定为「整数分」，精度问题完全落在实现内部 ——
+      否则换成 BigDecimal 会动到公开签名，被 API 护栏拦住，那不是能力测试而是送死题。
+
+  - id: billing-payment-schedule
+    project: examples/eval/billing-legacy
+    entryFile: src/main/java/com/example/billing/PaymentSchedule.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 日期时间迁移（Date/Calendar/SimpleDateFormat → java.time），含月末钳位
+    patterns: [date-time, calendar-dow, index-loop]
+    notes: >
+      两处语义陷阱被刻意保留并钉住：① 月末加月的钳位（2024-01-31 +1 月 = 2024-02-29）；
+      ② Calendar 的 1=周日 与 ISO 的 1=周一。另注意星期名用 Locale.ENGLISH —— 
+      本 JDK 的 Locale.ROOT 星期名只有缩写，locale 被顺手改回 ROOT 会让输出变短。
+      同文件里还有个共享的 static SimpleDateFormat（线程安全地雷）与「每次新建」的正确写法作对照。
+
+  - id: billing-tax-rule-engine
+    project: examples/eval/billing-legacy
+    entryFile: src/main/java/com/example/billing/TaxRuleEngine.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 匿名内部类 Comparator → lambda，循环内字符串拼接 → text block / join
+    patterns: [anonymous-inner-class, comparator, string-concat, collections-sort, explicit-generics, enumeration-iterator]
+    notes: >
+      排序比较器写成全序（起点 → 税率 → 加入序），使输出与「排序是否稳定」无关；
+      税额一律整数向下取整，断言用精确值。
+      档位下界是闭区间，每个起点都测「刚好够」与「差一分」。
+
+  - id: billing-refund-ledger
+    project: examples/eval/billing-legacy
+    entryFile: src/main/java/com/example/billing/RefundLedger.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 旧集合走查（Hashtable/Vector/Stack → HashMap/ArrayList/ArrayDeque）
+    patterns: [legacy-collections, enumeration-iterator, comparator, boxing, string-concat]
+    notes: >
+      排序比较器带订单号 tie-break —— 否则金额相同的订单先后会取决于底层 map 迭代顺序，
+      而 Hashtable 与 HashMap 迭代顺序一般不同，模型做对每件事也会假失败。
+      复核队列按 LIFO 语义钉住（Stack.pop ↔ ArrayDeque.pop 是一对一替换，换成 removeFirst 就成队列了）。
+
+  # ==================================================================
+  # 既有样例工程 —— 作为回归样本纳入
+  # ==================================================================
+
+  - id: demo-sales-report
+    project: examples/legacy-demo
+    entryFile: src/main/java/com/example/legacy/LegacySalesReport.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 阶段 1 起就在用的冒烟样本（装箱 / 匿名 Comparator / Date / 文本块）
+    patterns: [money-double, boxing, date-time, anonymous-inner-class, comparator, string-concat]
+    notes: 最老的样本，也是唯一一个被反复手工跑过的 —— 它绿了不代表新样本对，但红了必是回归。
+
+  - id: complex-customer-orders
+    project: examples/legacy-demo-complex
+    entryFile: src/main/java/com/example/legacy/LegacyCustomerOrders.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 类内多职责耦合的较大单文件（跨方法一致性）
+    patterns: [date-time, anonymous-inner-class, legacy-collections, string-concat, boxing]
+    notes: 单文件内的耦合型样本，用于对照 billing-legacy 那种「同工程多文件解耦」的形态。
+
+  # ==================================================================
+  # 负样本 —— 期望失败（这一组决定了成功率的分子有没有意义）
+  # ==================================================================
+  # 只跑正样本的评测集无法区分「Agent 真的会改」与「Agent 永远报成功」。
+  # 负样本的作用是给成功率一个分母：3/29 期望失败时，正样本 26/26 才是满分。
+
+  - id: negative-test-compile-fail
+    project: examples/legacy-unfixable
+    entryFile: src/main/java/com/example/unfixable/LegacyStockLedger.java
+    targetJdk: 21
+    expect: FAILED
+    ready: true
+    title: 入口文件可改但工程永远编不过（测试引用了已删除的类）
+    patterns: [legacy-collections, boxing]
+    notes: >
+      考的是失败收敛：ANALYZE / REWRITE 都会成功，VERIFY 必然失败，
+      且失败信息指向另一个文件。正确行为是在 max-rewrite-attempts 轮之后停下，
+      而不是把预算无限烧在一个不可能的任务上。
+
+  # ==================================================================
+  # 规划中 —— 路线图（尚未写样本，harness 跳过；见 CaseCatalogTest）
+  # ==================================================================
+  # catalog 既是「可跑样本清单」也是「路线图」，二者必须分得开：
+  # 验收标准「≥ 20 个可迁移目标」只数 ready:true；规划中的条目留在这里当方向。
+
+  - id: jdbc-statement-modernize
+    project: examples/eval/jdbc-legacy
+    entryFile: src/main/java/com/example/jdbc/OrderDao.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: false
+    title: （规划中）DriverManager/Statement/sql.Date → DataSource/PreparedStatement/LocalDate
+    patterns: [jdbc-legacy, date-time, resource-management, exception-swallow]
+    notes: 路线图条目：JDBC 旧范式迁移，覆盖资源管理与异常吞咽两类遗留模式，待写样本工程。
+
+  - id: servlet-package-rename
+    project: examples/eval/servlet-legacy
+    entryFile: src/main/java/com/example/servlet/OldController.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: false
+    title: （规划中）javax.servlet → jakarta.servlet 包名迁移
+    patterns: [package-rename, servlet-legacy]
+    notes: 路线图条目：Jakarta 命名空间迁移，最经典的 JDK8→现代化配套动作，待写样本工程。
+
+  # ==================================================================
+  # inventory-legacy —— 库存域（B2 已就绪）
+  # ==================================================================
+  # 与 billing-legacy 同一条硬约束：同工程内四个类互不调用，每个测试类只测自己。
+
+  - id: inventory-stock-balance
+    project: examples/eval/inventory-legacy
+    entryFile: src/main/java/com/example/inventory/StockBalance.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: Vector/Hashtable 结存台账 + Iterator 遍历 → for-each / Stream
+    patterns: [legacy-collections, enumeration-iterator, boxing]
+    notes: >
+      低库存清单按「库存升序 + sku 字典序」输出 —— Hashtable 与 HashMap 迭代顺序不同，
+      不定序的话模型每件事都做对也会假失败。流水返回防御性拷贝，由单测钉住。
+
+  - id: inventory-sku-index
+    project: examples/eval/inventory-legacy
+    entryFile: src/main/java/com/example/inventory/SkuIndex.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 手写二分查找与 Arrays 旧用法 → Arrays.binarySearch / 泛型方法
+    patterns: [explicit-generics, index-loop, boxing]
+    notes: >
+      最要紧的一条契约：查不到返回 -1，而不是 Arrays.binarySearch 的「插入点编码」
+      （-(insertionPoint)-1）。直接照搬二分会让 indexOf 在缺货时返回负数 ——
+      这是迁移里最容易顺手引入的回归，单测专门盯它。
+
+  - id: inventory-movement-log
+    project: examples/eval/inventory-legacy
+    entryFile: src/main/java/com/example/inventory/MovementLog.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 手写扩容数组 → ArrayList / 集合工厂方法
+    patterns: [index-loop, explicit-generics, string-concat]
+    notes: >
+      capacity() 把「扩容是否发生」变成可观测行为并钉住。换成 ArrayList 后容量不再可观测，
+      迁移时必须显式回答「这个性质还要不要」，而不是让它悄悄消失。
+
+  - id: inventory-reorder-rules
+    project: examples/eval/inventory-legacy
+    entryFile: src/main/java/com/example/inventory/ReorderRules.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 匿名内部类 Predicate 过滤 → lambda / Stream.filter
+    patterns: [anonymous-inner-class, comparator, legacy-collections]
+    notes: >
+      自带 Filter 接口是这个类的「时代指纹」。正确迁移是保留它作为对外契约、内部换成 lambda ——
+      换成 java.util.function.Predicate 会动公开签名，被 API 护栏拦住。
+      skusNeedingReorder 的结果按字典序，与容器插入顺序无关。
+
+  - id: payroll-salary-run
+    project: examples/eval/payroll-legacy
+    entryFile: src/main/java/com/example/payroll/SalaryRun.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 工资核算：Calendar 月份算术 → java.time，Object[] 强转 → 泛型容器
+    patterns: [date-time, legacy-collections, boxing]
+
+  - id: payroll-tax-year
+    project: examples/eval/payroll-legacy
+    entryFile: src/main/java/com/example/payroll/TaxYear.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 手工算年份边界 → Year / YearMonth
+    patterns: [date-time, index-loop]
+
+  - id: payroll-payslip-format
+    project: examples/eval/payroll-legacy
+    entryFile: src/main/java/com/example/payroll/PayslipFormatter.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 逐行 StringBuilder 拼工资条 → text block
+    patterns: [string-concat, date-time]
+
+  - id: payroll-overtime-rule
+    project: examples/eval/payroll-legacy
+    entryFile: src/main/java/com/example/payroll/OvertimeRule.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 匿名 Comparator 排序 + 显式装箱 → 方法引用 + 自动装箱
+    patterns: [anonymous-inner-class, comparator, boxing, collections-sort]
+
+  - id: logparse-line-scanner
+    project: examples/eval/logparse-legacy
+    entryFile: src/main/java/com/example/logparse/LineScanner.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: try/finally 手写关闭 BufferedReader → try-with-resources
+    patterns: [resource-management, exception-swallow]
+
+  - id: logparse-error-tally
+    project: examples/eval/logparse-legacy
+    entryFile: src/main/java/com/example/logparse/ErrorTally.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: catch(Exception) 吞掉 + printStackTrace → 具体异常与结构化日志
+    patterns: [exception-swallow, print-stack-trace, legacy-collections]
+
+  - id: logparse-rotate-policy
+    project: examples/eval/logparse-legacy
+    entryFile: src/main/java/com/example/logparse/RotatePolicy.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: File 路径拼接 → Path / Paths，SimpleDateFormat 文件名 → DateTimeFormatter
+    patterns: [resource-management, date-time, string-concat]
+
+  - id: logparse-report-main
+    project: examples/eval/logparse-legacy
+    entryFile: src/main/java/com/example/logparse/ReportMain.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 业务逻辑全塞在 static main 里 → 抽出可测方法
+    patterns: [static-main-logic, resource-management, string-concat]
+
+  - id: csvreport-row-joiner
+    project: examples/eval/csvreport-legacy
+    entryFile: src/main/java/com/example/csvreport/RowJoiner.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 循环内字符串 + 拼接 CSV 行 → String.join
+    patterns: [string-concat, index-loop]
+
+  - id: csvreport-column-sorter
+    project: examples/eval/csvreport-legacy
+    entryFile: src/main/java/com/example/csvreport/ColumnSorter.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 匿名 Comparator 多字段排序 → Comparator.comparing/thenComparing
+    patterns: [anonymous-inner-class, comparator, collections-sort]
+
+  - id: csvreport-header-map
+    project: examples/eval/csvreport-legacy
+    entryFile: src/main/java/com/example/csvreport/HeaderMap.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: Hashtable 表头索引 + 手工拆行 → Map / String.split 与 Stream
+    patterns: [legacy-collections, enumeration-iterator, string-concat]
+
+  - id: csvreport-fixed-width
+    project: examples/eval/csvreport-legacy
+    entryFile: src/main/java/com/example/csvreport/FixedWidthWriter.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 手工补空格对齐 → String.repeat / formatted 与 text block
+    patterns: [string-concat, index-loop]
+
+  - id: authtoken-token-digest
+    project: examples/eval/authtoken-legacy
+    entryFile: src/main/java/com/example/authtoken/TokenDigest.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 手拼 hex 摘要 → HexFormat
+    patterns: [crypto-encoding, number-format, string-concat]
+
+  - id: authtoken-base64-codec
+    project: examples/eval/authtoken-legacy
+    entryFile: src/main/java/com/example/authtoken/Base64Codec.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: sun.misc.BASE64Encoder / 手写查表 → java.util.Base64
+    patterns: [crypto-encoding, exception-swallow, index-loop]
+
+  - id: authtoken-expiry-check
+    project: examples/eval/authtoken-legacy
+    entryFile: src/main/java/com/example/authtoken/ExpiryCheck.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: Date 比较有效期 → Instant / Duration
+    patterns: [date-time, boxing]
+
+  - id: authtoken-secret-store
+    project: examples/eval/authtoken-legacy
+    entryFile: src/main/java/com/example/authtoken/SecretStore.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 吞异常的「找不到就返回 null」→ Optional
+    patterns: [exception-swallow, legacy-collections]
+
+  - id: negative-api-leak
+    project: examples/eval/negative/unfixable-api-leak
+    entryFile: src/main/java/com/example/negative/ApiLeak.java
+    targetJdk: 21
+    expect: FAILED
+    ready: true
+    title: 正确改写必须动公开签名，被 API 护栏拦住
+    patterns: [legacy-collections, boxing]
+    notes: 考察护栏是否真的能拦住「为了编过而改签名」这条捷径。
+
+  - id: negative-unsatisfiable-test
+    project: examples/eval/negative/unsatisfiable-test
+    entryFile: src/main/java/com/example/negative/Unsatisfiable.java
+    targetJdk: 21
+    expect: FAILED
+    ready: true
+    title: 同一调用被断言成两个矛盾结果，任何实现都不可能同时通过
+    patterns: [money-double]
+    notes: 考察 max-rewrite-attempts 是否真的封顶，以及失败原因是否可读。

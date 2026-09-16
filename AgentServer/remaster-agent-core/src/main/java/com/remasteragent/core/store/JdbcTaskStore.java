@@ -353,10 +353,14 @@ public class JdbcTaskStore implements TaskStore {
 
     @Override
     public int countVerifyRounds(long taskId) {
-        Integer count = jdbc.queryForObject("""
-                SELECT COUNT(*) FROM dag_node WHERE task_id = ? AND node_type = 'VERIFY'
+        // 轮次 = 最大 attempt + 1，不是节点总数：多文件计划里每个文件各有一串 VERIFY 节点，
+        // 按 COUNT(*) 统计会把「N 个文件各跑一轮」误报成「回退了 N-1 次」。
+        // 没有 VERIFY 节点时 COALESCE 回落 0 —— 那是「没跑过」，不能报 1。
+        Integer rounds = jdbc.queryForObject("""
+                SELECT COALESCE(MAX(attempt) + 1, 0) FROM dag_node
+                 WHERE task_id = ? AND node_type = 'VERIFY'
                 """, Integer.class, taskId);
-        return count == null ? 0 : count;
+        return rounds == null ? 0 : rounds;
     }
 
     @Override

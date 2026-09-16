@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>billing-legacy</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>billing-legacy</name>
+    <description>
+        计费域的遗留工程样例（评测集用例之一）。四个目标类各自独立，
+        分别覆盖：金额精度、日期时间、匿名内部类与字符串拼接、旧集合实现。
+    </description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!--
+          release 钉 21 而不是 8：沙箱用 JDK 21 构建，迁移目标也是 JDK 21。
+          本工程「遗留」之处在【源码写法】而非编译级别；钉 8 会让模型按提示词产出的
+          text block 被 javac 拒绝 —— 那是评测环境自己设的陷阱，不是模型改错了。
+        -->
+        <maven.compiler.release>21</maven.compiler.release>
+        <junit.version>5.12.2</junit.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 版本显式钉死：评测结果必须可复现，不能让换个插件版本改变结论 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.1</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.6</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>
