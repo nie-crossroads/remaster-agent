@@ -50,7 +50,7 @@ public final class EvalRunner {
 
         long taskId;
         try {
-            taskId = api.createTask(projectRoot, evalCase.entryFile(), evalCase.targetJdk());
+            taskId = api.createTask(projectRoot, evalCase.entryFile(), evalCase.targetJdk(), evalCase.id());
         } catch (RuntimeException e) {
             progress.accept("提交失败: " + e.getMessage());
             return EvalRun.harnessError(evalCase, elapsedMs(startedAtNanos),

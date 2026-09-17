@@ -72,6 +72,13 @@ export interface TaskView {
   id: number
   projectRoot: string
   entryFile: string
+  /**
+   * 任务名（建单页手动输入，可选）。
+   *
+   * 为 `null` 表示建单时没填（评测任务以前建的、或用户留空）—— 界面要回退成 `#id`，
+   * 而不是显示空白，否则列表里会出现几行看不出是哪个任务的条目。
+   */
+  name: string | null
   targetJdk: number
   status: TaskStatus
   failReason: string | null
@@ -243,6 +250,8 @@ export interface CreateTaskRequest {
   projectRoot: string
   entryFile: string
   targetJdk?: number
+  /** 任务名（可选，仅展示用；留空则后端存 null，列表回退显示 #id）。 */
+  name?: string
 }
 
 /**

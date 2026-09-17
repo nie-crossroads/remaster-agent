@@ -214,7 +214,7 @@ class TaskControllerControlTest {
 
     private static MigrationTask task(TaskStatus status) {
         Instant now = Instant.now();
-        return new MigrationTask(TASK_ID, "/proj", "A.java", 21, status, null, null, false, now, now);
+        return new MigrationTask(TASK_ID, "/proj", "A.java", 21, status, null, null, false, now, now, null);
     }
 
     private static HumanGate openGate() {
@@ -231,7 +231,7 @@ class TaskControllerControlTest {
     /** 与后端 record 字段一一对应的最小视图，用来断言接口返回值（而不是断 mock 的默认 null）。 */
     private static TaskView summary(TaskStatus status) {
         Instant now = Instant.now();
-        return new TaskView(TASK_ID, "/proj", "A.java", 21, status.name(), null, false, now, now, null,
+        return new TaskView(TASK_ID, "/proj", "A.java", null, 21, status.name(), null, false, now, now, null,
                 // 累计运行时长：这里的 store 是内存实现、没落 span，所以是「不知道」而不是 0
                 null);
     }

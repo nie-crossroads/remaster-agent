@@ -74,7 +74,7 @@ class TaskConsumerTest {
     @Test
     @DisplayName("队列消息里的 traceparent 必须原样交给调度器 —— 跨进程链路全靠它")
     void traceparentFromMessageReachesScheduler() {
-        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21, null);
         String traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
         queue.enqueue(taskId, traceparent);
 
@@ -87,7 +87,7 @@ class TaskConsumerTest {
     @Test
     @DisplayName("没有 traceparent 时传 null —— 自起一条 trace，不影响任务执行")
     void missingTraceparentIsPassedThroughAsNull() {
-        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21, null);
         queue.enqueue(taskId);
 
         consumer().processOnce();
@@ -99,7 +99,7 @@ class TaskConsumerTest {
     @Test
     @DisplayName("任务已是终态：不重跑，但仍要确认消息")
     void terminalTaskIsSkippedButAcknowledged() {
-        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21, null);
         store.updateTaskStatus(taskId, TaskStatus.SUCCEEDED, null);
         queue.enqueue(taskId);
 
@@ -114,7 +114,7 @@ class TaskConsumerTest {
     @Test
     @DisplayName("正常任务：执行并确认")
     void pendingTaskRunsAndIsAcknowledged() {
-        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21, null);
         queue.enqueue(taskId);
 
         consumer().processOnce();
@@ -138,7 +138,7 @@ class TaskConsumerTest {
     @Test
     @DisplayName("执行抛异常但任务已落终态：确认 —— 重试也没意义")
     void failureWithTerminalStatusIsAcknowledged() {
-        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21, null);
         onRun = id -> {
             // 模拟调度器：失败时先把任务标成 FAILED，然后把异常抛上来
             store.updateTaskStatus(id, TaskStatus.FAILED, "重写尝试已用尽");
@@ -154,7 +154,7 @@ class TaskConsumerTest {
     @Test
     @DisplayName("执行中途出错且任务未落终态：不确认，等待接管重跑")
     void failureWithoutTerminalStatusIsNotAcknowledged() {
-        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21, null);
         onRun = id -> {
             // 模拟临时故障：数据库抖动、Redis 掉线 —— 任务停在 RUNNING
             throw new IllegalStateException("写 checkpoint 时连接断开");
@@ -171,7 +171,7 @@ class TaskConsumerTest {
     @Test
     @DisplayName("接管『上一个 Worker 被杀』的遗留消息：同样会被执行")
     void reclaimedMessagesAreProcessed() {
-        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21, null);
         TaskQueue.QueueMessage abandoned = queue.addReclaimable(taskId);
         consumer().processOnce();
 
@@ -183,8 +183,8 @@ class TaskConsumerTest {
     @Test
     @DisplayName("一轮里遗留消息先于新消息被处理（顺序影响任务的推进次序）")
     void reclaimedMessagesAreHandledBeforeFreshOnes() {
-        long oldTask = store.createTask("E:/demo", "Old.java", 21);
-        long newTask = store.createTask("E:/demo", "New.java", 21);
+        long oldTask = store.createTask("E:/demo", "Old.java", 21, null);
+        long newTask = store.createTask("E:/demo", "New.java", 21, null);
         queue.addReclaimable(oldTask);
         queue.enqueue(newTask);
 
@@ -196,7 +196,7 @@ class TaskConsumerTest {
     @Test
     @DisplayName("启动只初始化队列 —— 残留 RUNNING 节点不再在启动时被全局重置")
     void startOnlyInitializesQueue() {
-        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21, null);
         long nodeId = store.insertNode(taskId, "rewrite", NodeType.REWRITE, List.of(), 0);
         store.markNodeRunning(nodeId);
 
@@ -237,7 +237,7 @@ class TaskConsumerTest {
     @Test
     @DisplayName("一轮消费顺带回收过期沙箱：终态且超期的 task-<id> 目录被永久删除")
     void expiredSandboxIsReclaimedOnProcessOnce(@TempDir Path sandboxRoot) throws IOException {
-        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21, null);
         store.updateTaskStatus(taskId, TaskStatus.SUCCEEDED, null);
         Path sandbox = Files.createDirectories(sandboxRoot.resolve("task-" + taskId));
         Files.writeString(sandbox.resolve("pom.xml"), "<project/>");

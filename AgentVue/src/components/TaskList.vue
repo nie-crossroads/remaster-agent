@@ -31,9 +31,23 @@ function isSelected(id: number): boolean {
   <div class="task-list-panel">
     <header>
       <h2>任务列表</h2>
-      <el-button text :loading="tasks.listLoading" @click="tasks.refreshList()">
-        刷新
-      </el-button>
+      <div class="header-actions">
+		<el-button
+          plain
+          size="small"
+          :loading="tasks.listLoading"
+          @click="tasks.refreshList()"
+        >
+          刷新列表
+        </el-button>
+        <el-button
+          type="primary"
+          size="small"
+          @click="tasks.startCreate()"
+        >
+          新建任务
+        </el-button>
+      </div>
     </header>
 
     <div v-if="tasks.listError" class="error-banner">
@@ -54,6 +68,10 @@ function isSelected(id: number): boolean {
       >
         <div class="row1">
           <span class="id">#{{ task.id }}</span>
+          <!-- 任务名是主标签；老任务/未命名回退为「未命名」，不留空 -->
+          <span class="name" :title="task.name ?? undefined">
+            {{ task.name || '未命名' }}
+          </span>
           <el-tag :type="TASK_STATUS_TAG[task.status]" size="small">
             {{ TASK_STATUS_LABEL[task.status] }}
           </el-tag>
@@ -96,6 +114,12 @@ header h2 {
   font-weight: 600;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 ul {
   list-style: none;
   padding: 0;
@@ -122,13 +146,28 @@ li.active {
 .row1 {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   margin-bottom: 4px;
 }
 
 .id {
-  font-weight: 600;
+  flex: 0 0 auto;
+  color: var(--text-muted);
   font-family: 'SFMono-Regular', Consolas, monospace;
+}
+
+/* 任务名占满剩余宽度，过长省略而不是把状态标签挤下去 */
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row1 :deep(.el-tag) {
+  flex: 0 0 auto;
 }
 
 .path {

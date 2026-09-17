@@ -68,7 +68,9 @@ const detail = computed(() => tasks.currentDetail)
 const lastTaskHeaderLabel = computed(() => {
   const t = detail.value?.task
   if (!t) return null
-  return `任务 #${t.id} · ${t.projectRoot.split(/[\\/]/).slice(-1)[0]}/${t.entryFile.split('/').pop()}`
+  const location = `${t.projectRoot.split(/[\\/]/).slice(-1)[0]}/${t.entryFile.split('/').pop()}`
+  // 有任务名时把它放进标题：它是用户给这次迁移起的名字，比路径更容易认
+  return t.name ? `任务 #${t.id} · ${t.name} · ${location}` : `任务 #${t.id} · ${location}`
 })
 
 /**
@@ -340,7 +342,7 @@ onUnmounted(() => {
 
         <div v-else class="card">
           <div class="empty-state">
-            <p>👈 从左侧列表选一个任务，或在右上表单新建</p>
+            <p>👈 点「新建任务」创建迁移，或从左侧列表选一个任务查看详情</p>
             <p class="hint">ANALYZE → PLAN → 按文件 REWRITE → VERIFY 的全流程会在右栏实时滚动</p>
           </div>
         </div>

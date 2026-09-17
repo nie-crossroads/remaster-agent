@@ -38,7 +38,7 @@ class GateNodeTest {
     @Test
     @DisplayName("首次执行：落一行 PENDING 门禁并返回挂起（既非成功也非失败）")
     void firstRunCreatesGateAndSuspends() {
-        long taskId = store.createTask("/tmp/proj", "A.java", 21);
+        long taskId = store.createTask("/tmp/proj", "A.java", 21, null);
         NodeContext context = contextFor(taskId, "com/foo/A.java");
 
         NodeOutcome outcome = gateNode.execute(context);
@@ -60,7 +60,7 @@ class GateNodeTest {
     @Test
     @DisplayName("重复执行同一节点：复用已有门禁，不落第二行（一次挂起不等于两张待办）")
     void rerunReusesExistingGate() {
-        long taskId = store.createTask("/tmp/proj", "A.java", 21);
+        long taskId = store.createTask("/tmp/proj", "A.java", 21, null);
         NodeContext context = contextFor(taskId, "com/foo/A.java");
 
         gateNode.execute(context);

@@ -70,17 +70,18 @@ public class JdbcTaskStore implements TaskStore {
     // ------------------------------------------------------------------
 
     @Override
-    public long createTask(String projectRoot, String entryFile, int targetJdk) {
+    public long createTask(String projectRoot, String entryFile, int targetJdk, String name) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(connection -> {
             PreparedStatement ps = connection.prepareStatement("""
-                    INSERT INTO migration_task (project_root, entry_file, target_jdk, status)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO migration_task (project_root, entry_file, target_jdk, name, status)
+                    VALUES (?, ?, ?, ?, ?)
                     """, ID_COLUMN);
             ps.setString(1, projectRoot);
             ps.setString(2, entryFile);
             ps.setInt(3, targetJdk);
-            ps.setString(4, TaskStatus.PENDING.name());
+            ps.setString(4, name);
+            ps.setString(5, TaskStatus.PENDING.name());
             return ps;
         }, keyHolder);
         return requireKey(keyHolder);
@@ -89,7 +90,7 @@ public class JdbcTaskStore implements TaskStore {
     @Override
     public Optional<MigrationTask> findTask(long taskId) {
         List<MigrationTask> rows = jdbc.query("""
-                SELECT id, project_root, entry_file, target_jdk, status, metrics, fail_reason,
+                SELECT id, project_root, entry_file, target_jdk, name, status, metrics, fail_reason,
                        cancel_requested, created_at, updated_at
                   FROM migration_task WHERE id = ?
                 """, TASK_MAPPER, taskId);
@@ -123,7 +124,7 @@ public class JdbcTaskStore implements TaskStore {
         // 次级排序键用 id 而不是 updated_at：同一秒内创建的任务在时间上无法区分，
         // 加上 id 才能保证顺序稳定（否则列表会在两次请求之间莫名换位）
         return jdbc.query("""
-                SELECT id, project_root, entry_file, target_jdk, status, metrics, fail_reason,
+                SELECT id, project_root, entry_file, target_jdk, name, status, metrics, fail_reason,
                        cancel_requested, created_at, updated_at
                   FROM migration_task
                  ORDER BY created_at DESC, id DESC
@@ -546,7 +547,8 @@ public class JdbcTaskStore implements TaskStore {
             rs.getString("fail_reason"),
             rs.getBoolean("cancel_requested"),
             toInstant(rs.getTimestamp("created_at")),
-            toInstant(rs.getTimestamp("updated_at")));
+            toInstant(rs.getTimestamp("updated_at")),
+            rs.getString("name"));
 
     private static final RowMapper<DagNode> NODE_MAPPER = (rs, rowNum) -> new DagNode(
             rs.getLong("id"),

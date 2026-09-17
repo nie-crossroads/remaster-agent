@@ -305,7 +305,7 @@ class DagSchedulerRollbackTest {
     // ------------------------------------------------------------------
 
     private long newTask(InMemoryTaskStore store) {
-        return store.createTask(projectRoot.toString(), ENTRY, 21);
+        return store.createTask(projectRoot.toString(), ENTRY, 21, null);
     }
 
     private DagScheduler scheduler(InMemoryTaskStore store, NodeExecutor... executors) {

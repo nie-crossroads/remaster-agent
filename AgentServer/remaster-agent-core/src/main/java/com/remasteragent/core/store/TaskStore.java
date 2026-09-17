@@ -36,8 +36,8 @@ public interface TaskStore {
     // 任务
     // ------------------------------------------------------------------
 
-    /** 创建任务，返回自增 id。 */
-    long createTask(String projectRoot, String entryFile, int targetJdk);
+    /** 创建任务，返回自增 id。name 为任务名（可选，仅展示用，可为 null）。 */
+    long createTask(String projectRoot, String entryFile, int targetJdk, String name);
 
     Optional<MigrationTask> findTask(long taskId);
 

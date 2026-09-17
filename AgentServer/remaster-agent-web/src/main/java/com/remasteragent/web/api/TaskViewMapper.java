@@ -58,6 +58,7 @@ public class TaskViewMapper {
                 task.id(),
                 task.projectRoot(),
                 task.entryFile(),
+                task.name(),
                 task.targetJdk(),
                 task.status() == null ? null : task.status().name(),
                 task.failReason(),

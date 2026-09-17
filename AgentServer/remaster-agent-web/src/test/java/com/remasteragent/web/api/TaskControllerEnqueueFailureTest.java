@@ -44,7 +44,7 @@ class TaskControllerEnqueueFailureTest {
         TaskQueue taskQueue = mock(TaskQueue.class);
         TaskQueryService queryService = mock(TaskQueryService.class);
 
-        when(taskStore.createTask(anyString(), anyString(), anyInt())).thenReturn(42L);
+        when(taskStore.createTask(anyString(), anyString(), anyInt(), any())).thenReturn(42L);
         // 打桩必须对准【两参】版本 —— 投递现在会把 API 侧的 traceparent 一起带过去。
         // 只桩单参版会静默不生效：doThrow 不匹配 → 「投递失败」这条路径根本没被触发，
         // 而断言报出来的是「期望抛异常但没抛」，很容易被误读成业务逻辑坏了。
@@ -53,7 +53,7 @@ class TaskControllerEnqueueFailureTest {
 
         TaskController controller = new TaskController(taskStore, taskQueue, queryService, null, null);
         CreateTaskRequest request = new CreateTaskRequest(
-                root.toString(), "src/main/java/com/example/Demo.java", 21);
+                root.toString(), "src/main/java/com/example/Demo.java", 21, null);
 
         QueueUnavailableException thrown = assertThrows(QueueUnavailableException.class,
                 () -> controller.create(request));

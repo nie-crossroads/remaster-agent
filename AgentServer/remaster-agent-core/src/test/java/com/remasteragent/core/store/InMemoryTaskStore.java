@@ -59,11 +59,11 @@ public final class InMemoryTaskStore implements TaskStore {
     // ------------------------------------------------------------------
 
     @Override
-    public long createTask(String projectRoot, String entryFile, int targetJdk) {
+    public long createTask(String projectRoot, String entryFile, int targetJdk, String name) {
         long id = ++taskSeq;
         Instant now = Instant.now();
         tasks.put(id, new MigrationTask(id, projectRoot, entryFile, targetJdk,
-                TaskStatus.PENDING, null, null, false, now, now));
+                TaskStatus.PENDING, null, null, false, now, now, name));
         return id;
     }
 
@@ -85,7 +85,8 @@ public final class InMemoryTaskStore implements TaskStore {
 
     private static MigrationTask copy(MigrationTask task, TaskStatus status, String metricsJson, String failReason) {
         return new MigrationTask(task.id(), task.projectRoot(), task.entryFile(), task.targetJdk(),
-                status, metricsJson, failReason, task.cancelRequested(), task.createdAt(), Instant.now());
+                status, metricsJson, failReason, task.cancelRequested(), task.createdAt(), Instant.now(),
+                task.name());
     }
 
     @Override
@@ -210,7 +211,7 @@ public final class InMemoryTaskStore implements TaskStore {
     private static MigrationTask withCancel(MigrationTask task, boolean cancelRequested) {
         return new MigrationTask(task.id(), task.projectRoot(), task.entryFile(), task.targetJdk(),
                 task.status(), task.metricsJson(), task.failReason(), cancelRequested,
-                task.createdAt(), Instant.now());
+                task.createdAt(), Instant.now(), task.name());
     }
 
     // ------------------------------------------------------------------

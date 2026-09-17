@@ -223,7 +223,7 @@ class GateTimeoutSweeperTest {
 
     /** 造一个「已挂在一道等待中门禁上」的任务：ANALYZE 成功 + GATE 挂起。 */
     private static long waitingOnGate(InMemoryTaskStore store) {
-        long taskId = store.createTask("E:/demo", "src/main/java/com/example/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/main/java/com/example/Demo.java", 21, null);
         store.insertNode(taskId, "analyze", NodeType.ANALYZE, List.of(), 0);
         long gateNodeId = store.insertNode(taskId, nodeKey(), NodeType.GATE, List.of(), 0);
         store.insertGate(gateNodeId, "已改写 Demo.java，请确认补丁后再继续验证");

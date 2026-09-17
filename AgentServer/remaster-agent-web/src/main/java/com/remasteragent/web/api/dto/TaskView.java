@@ -34,6 +34,7 @@ public record TaskView(
         long id,
         String projectRoot,
         String entryFile,
+        String name,
         int targetJdk,
         String status,
         String failReason,

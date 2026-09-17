@@ -96,7 +96,7 @@ class RewriteNodeTest {
 
         Path projectRoot = tmp.resolve("legacy-demo");
         Files.createDirectories(projectRoot);
-        taskId = store.createTask(projectRoot.toString(), ENTRY, 21);
+        taskId = store.createTask(projectRoot.toString(), ENTRY, 21, null);
 
         // 预置 ANALYZE 的 checkpoint —— REWRITE 从它读上下文
         JsonCodec mapper = new JsonCodec();
@@ -220,7 +220,7 @@ class RewriteNodeTest {
     @DisplayName("找不到 ANALYZE 产出：直接失败，不调用模型")
     void missingAnalysisFailsFast() {
         InMemoryTaskStore emptyStore = new InMemoryTaskStore();
-        long lonelyTask = emptyStore.createTask(tmp.toString(), ENTRY, 21);
+        long lonelyTask = emptyStore.createTask(tmp.toString(), ENTRY, 21, null);
         emptyStore.insertNode(lonelyTask, RewriteNode.NODE_KEY, NodeType.REWRITE, List.of(), 0);
         CapturingRewriter rewriter = new CapturingRewriter(proposal(ENTRY, MODERN_SOURCE), null);
 

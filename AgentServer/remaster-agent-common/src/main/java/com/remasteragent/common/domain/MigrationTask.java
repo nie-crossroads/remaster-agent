@@ -20,6 +20,7 @@ import java.time.Instant;
  *                   因为此刻确实还有节点在跑，写成 CANCELLED 就是撒谎。前端据它显示「正在取消…」
  * @param createdAt   创建时间
  * @param updatedAt   最后更新时间
+ * @param name        任务名（建单页手动输入，可选；评测任务取用例 id）。仅用于展示区分，不参与编排
  */
 public record MigrationTask(
         Long id,
@@ -31,7 +32,8 @@ public record MigrationTask(
         String failReason,
         boolean cancelRequested,
         Instant createdAt,
-        Instant updatedAt
+        Instant updatedAt,
+        String name
 ) {
     public static final int DEFAULT_TARGET_JDK = 21;
 }

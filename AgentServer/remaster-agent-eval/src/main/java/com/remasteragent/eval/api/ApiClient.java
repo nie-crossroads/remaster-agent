@@ -44,13 +44,17 @@ public final class ApiClient implements AutoCloseable {
     /**
      * 提交一个迁移任务，返回任务 id。
      *
+     * @param name 任务名（可选，评测取用例 id）；为 null 时不写入请求体
      * @throws EvalApiException 非 2xx 响应
      */
-    public long createTask(String projectRoot, String entryFile, int targetJdk) {
+    public long createTask(String projectRoot, String entryFile, int targetJdk, String name) {
         ObjectNode body = EvalJson.JSON.createObjectNode();
         body.put("projectRoot", projectRoot);
         body.put("entryFile", entryFile);
         body.put("targetJdk", targetJdk);
+        if (name != null) {
+            body.put("name", name);
+        }
 
         String response = send(HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/api/tasks"))

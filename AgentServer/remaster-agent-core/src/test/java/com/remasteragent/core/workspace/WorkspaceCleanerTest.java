@@ -225,7 +225,7 @@ class WorkspaceCleanerTest {
 
     /** 建一个处于给定状态的任务（用 InMemoryTaskStore 的真实写入，updatedAt 即状态写入时刻）。 */
     private long terminalTask(TaskStatus status, String failReason) {
-        long taskId = store.createTask("E:/demo", "src/Demo.java", 21);
+        long taskId = store.createTask("E:/demo", "src/Demo.java", 21, null);
         store.updateTaskStatus(taskId, status, failReason);
         return taskId;
     }

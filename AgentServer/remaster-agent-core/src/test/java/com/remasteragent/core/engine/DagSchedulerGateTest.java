@@ -193,7 +193,7 @@ class DagSchedulerGateTest {
     // ------------------------------------------------------------------
 
     private long newTask(InMemoryTaskStore store) {
-        return store.createTask(projectRoot.toString(), ENTRY, 21);
+        return store.createTask(projectRoot.toString(), ENTRY, 21, null);
     }
 
     /** 开启「改写后人工门禁」的调度器；不装 PLAN 执行器 → 走 ANALYZE→REWRITE→GATE→VERIFY 退化拓扑。 */

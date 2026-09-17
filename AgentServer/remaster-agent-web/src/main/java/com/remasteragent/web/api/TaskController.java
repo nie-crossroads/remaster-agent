@@ -98,13 +98,14 @@ public class TaskController {
             ProjectPathValidator.ResolvedInput input =
                     ProjectPathValidator.validate(request.projectRoot(), request.entryFile());
             int targetJdk = request.targetJdkOrDefault();
+            String name = normalizeName(request.name());
 
             long taskId = taskStore.createTask(input.projectRoot().toString(),
-                    input.entryFile(), targetJdk);
+                    input.entryFile(), targetJdk, name);
             span.setAttribute("task.id", taskId);
             enqueueOrFail(taskId, input, TracePropagation.currentTraceparent());
-            log.info("任务 #{} 已创建并投递: 工程={} 目标文件={} JDK={}",
-                    taskId, input.projectRoot(), input.entryFile(), targetJdk);
+            log.info("任务 #{} 已创建并投递: 任务名={} 工程={} 目标文件={} JDK={}",
+                    taskId, name, input.projectRoot(), input.entryFile(), targetJdk);
 
             TaskView view = queryService.taskSummary(taskId);
             TraceTracer.endOk(span);
@@ -113,6 +114,21 @@ public class TaskController {
             TraceTracer.endException(span, e);
             throw e;
         }
+    }
+
+    /**
+     * 规整任务名：去空白，空白视为「未命名」（null）。
+     *
+     * <p>刻意不校验必填：任务名只是展示用的标签，值不值得为一个显示字段把建单卡住？
+     * 不值得 —— 真正决定任务能不能跑的是工程路径与目标文件。前端会引导填写，
+     * 但服务端留出「无名字也能建」的口子，评测 harness 等调用方就不必跟着改。
+     */
+    private static String normalizeName(String name) {
+        if (name == null) {
+            return null;
+        }
+        String trimmed = name.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     /**

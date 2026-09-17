@@ -63,6 +63,18 @@ export const useTasksStore = defineStore('tasks', () => {
   const listLoading = ref(false)
   const listError = ref<string | null>(null)
 
+  /**
+   * 任务表单当前是「新建」还是「查看」模式。
+   *
+   * - `create`：空白表单 + 提交按钮（即用户说的「新建迁移任务页面」）。
+   * - `view`  ：表单回填当前任务的信息、全部只读、隐藏提交按钮，标题改为「迁移任务」
+   *   （即用户说的「点击任务查看详情页面」）。
+   *
+   * 两者共用同一个 TaskForm 组件，靠这个标志切换渲染，而不是再拆两个路由页面——
+   * 工作台是单页内的左右分栏，拆路由反而要在每次切任务时整页切换、丢掉左侧列表状态。
+   */
+  const formMode = ref<'create' | 'view'>('create')
+
   const currentDetail = ref<TaskDetail | null>(null)
   const currentLoading = ref(false)
   const currentError = ref<string | null>(null)
@@ -290,6 +302,8 @@ export const useTasksStore = defineStore('tasks', () => {
     currentError.value = null
     currentDetail.value = null
     recentEvents.value = []
+    // 进入「查看任务」模式：表单切到只读回填当前任务（标题「迁移任务」，隐藏提交）。
+    formMode.value = 'view'
     // 链路数据属于「上一个任务」，必须一起清掉：留着它会让新任务的链路面板
     // 短暂显示另一个任务的时间轴 —— 而那上面的每一段耗时看起来都完全合理
     clearTrace()
@@ -343,6 +357,31 @@ export const useTasksStore = defineStore('tasks', () => {
       },
     })
     startFallback()
+  }
+
+  /**
+   * 切回「新建任务」模式：清空当前选中的任务详情，让主区域只剩空白表单。
+   *
+   * 清空 currentDetail 同时会关掉 SSE、清掉链路缓存——新建页本就没有任务可订阅，
+   * 留着旧任务的连接和面板只会让界面显示上一个任务的残影。
+   */
+  function startCreate(): void {
+    if (closeCurrentEvents) {
+      closeCurrentEvents()
+      closeCurrentEvents = null
+    }
+    stopFallback()
+    cancelScheduledDetailRefresh()
+    detailRefreshQueued = false
+    sseState.value = 'idle'
+    currentDetail.value = null
+    currentLoading.value = false
+    currentError.value = null
+    recentEvents.value = []
+    // 链路数据属于「上一个任务」，必须一起清掉
+    clearTrace()
+    controlError.value = null
+    formMode.value = 'create'
   }
 
   /**
@@ -806,6 +845,7 @@ export const useTasksStore = defineStore('tasks', () => {
     list,
     listLoading,
     listError,
+    formMode,
     currentDetail,
     currentLoading,
     currentError,
@@ -835,6 +875,7 @@ export const useTasksStore = defineStore('tasks', () => {
     // actions
     refreshList,
     selectTask,
+    startCreate,
     submit,
     approveCurrentPlan,
     rejectCurrentPlan,

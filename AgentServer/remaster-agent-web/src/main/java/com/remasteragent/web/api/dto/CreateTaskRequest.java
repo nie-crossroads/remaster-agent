@@ -14,6 +14,7 @@ import jakarta.validation.constraints.NotBlank;
  * @param projectRoot 被测工程根目录的绝对路径（必须含 pom.xml）
  * @param entryFile   本轮要改写的文件，相对 projectRoot 的路径，必须以 .java 结尾
  * @param targetJdk   目标 JDK 版本，缺省 21
+ * @param name        任务名（可选，仅展示用）。不强制填写以兼容评测 harness 等旧调用方
  */
 public record CreateTaskRequest(
         @NotBlank(message = "projectRoot 不能为空")
@@ -23,7 +24,9 @@ public record CreateTaskRequest(
         String entryFile,
 
         @Min(value = 17, message = "targetJdk 至少为 17")
-        Integer targetJdk
+        Integer targetJdk,
+
+        String name
 ) {
 
     public int targetJdkOrDefault() {

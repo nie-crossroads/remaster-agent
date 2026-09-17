@@ -31,7 +31,7 @@ class CountVerifyRoundsTest {
     @DisplayName("多文件各跑一轮 = 1 轮，不是 N 轮（这是本类存在的理由）")
     void multiFileSingleRoundCountsAsOne() {
         InMemoryTaskStore store = new InMemoryTaskStore();
-        long taskId = store.createTask("E:/proj", "src/main/java/com/example/A.java", 21);
+        long taskId = store.createTask("E:/proj", "src/main/java/com/example/A.java", 21, null);
 
         for (String key : List.of(FILE_A, FILE_B, FILE_C)) {
             store.insertNode(taskId, key, NodeType.VERIFY, List.of(), 0);
@@ -46,7 +46,7 @@ class CountVerifyRoundsTest {
     @DisplayName("回退时取最大 attempt + 1")
     void retriesRaiseTheRoundCount() {
         InMemoryTaskStore store = new InMemoryTaskStore();
-        long taskId = store.createTask("E:/proj", "src/main/java/com/example/A.java", 21);
+        long taskId = store.createTask("E:/proj", "src/main/java/com/example/A.java", 21, null);
 
         store.insertNode(taskId, FILE_A, NodeType.VERIFY, List.of(), 0);
         store.insertNode(taskId, FILE_A, NodeType.VERIFY, List.of(), 1);
@@ -59,7 +59,7 @@ class CountVerifyRoundsTest {
     @DisplayName("没有 VERIFY 节点时是 0（没跑过），不能报 1")
     void noVerifyNodesMeansZeroRounds() {
         InMemoryTaskStore store = new InMemoryTaskStore();
-        long taskId = store.createTask("E:/proj", "src/main/java/com/example/A.java", 21);
+        long taskId = store.createTask("E:/proj", "src/main/java/com/example/A.java", 21, null);
 
         assertEquals(0, store.countVerifyRounds(taskId));
     }
@@ -68,7 +68,7 @@ class CountVerifyRoundsTest {
     @DisplayName("REWRITE 节点不参与轮次统计")
     void rewriteNodesAreIgnored() {
         InMemoryTaskStore store = new InMemoryTaskStore();
-        long taskId = store.createTask("E:/proj", "src/main/java/com/example/A.java", 21);
+        long taskId = store.createTask("E:/proj", "src/main/java/com/example/A.java", 21, null);
 
         store.insertNode(taskId, "rewrite:src/main/java/com/example/A.java", NodeType.REWRITE, List.of(), 0);
         store.insertNode(taskId, "rewrite:src/main/java/com/example/A.java", NodeType.REWRITE, List.of(), 1);
