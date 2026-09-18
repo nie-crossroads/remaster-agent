@@ -8,8 +8,10 @@ import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.common.domain.PatchRecord;
+import com.remasteragent.common.domain.SourceWriteBack;
 import com.remasteragent.common.domain.TaskStatus;
 import com.remasteragent.common.domain.TraceSpan;
+import com.remasteragent.core.codec.JsonCodec;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
@@ -61,8 +63,16 @@ public class JdbcTaskStore implements TaskStore {
 
     private final JdbcTemplate jdbc;
 
-    public JdbcTaskStore(JdbcTemplate jdbc) {
+    /**
+     * 读 JSONB 列（回写审计里的文件清单）要用编排层自己的编解码器 ——
+     * 不能用 Spring 的 {@code ObjectMapper}：Worker 进程刻意不带 web starter，
+     * 容器里根本没有那个 Bean（理由见 {@code JsonCodec}）。
+     */
+    private final JsonCodec json;
+
+    public JdbcTaskStore(JdbcTemplate jdbc, JsonCodec json) {
         this.jdbc = jdbc;
+        this.json = json;
     }
 
     // ------------------------------------------------------------------
@@ -480,6 +490,48 @@ public class JdbcTaskStore implements TaskStore {
                 rs.getString("original_hash"),
                 rs.getBoolean("applied"),
                 toInstant(rs.getTimestamp("created_at"))), taskId);
+    }
+
+    // ------------------------------------------------------------------
+    // 变更回写审计
+    // ------------------------------------------------------------------
+
+    @Override
+    public long insertWriteBack(long taskId, String projectRoot, String backupDir,
+                               String filesJson, int fileCount) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement("""
+                    INSERT INTO source_write_back (task_id, project_root, backup_dir, files, file_count)
+                    VALUES (?, ?, ?, CAST(? AS jsonb), ?)
+                    """, ID_COLUMN);
+            ps.setLong(1, taskId);
+            ps.setString(2, projectRoot);
+            ps.setString(3, backupDir);
+            ps.setString(4, filesJson);
+            ps.setInt(5, fileCount);
+            return ps;
+        }, keyHolder);
+        return requireKey(keyHolder);
+    }
+
+    @Override
+    public List<SourceWriteBack> findWriteBacks(long taskId) {
+        return jdbc.query("""
+                SELECT id, task_id, project_root, backup_dir, files, file_count, applied_at
+                  FROM source_write_back
+                 WHERE task_id = ?
+                 ORDER BY id
+                """, (rs, rowNum) -> new SourceWriteBack(
+                rs.getLong("id"),
+                rs.getLong("task_id"),
+                rs.getString("project_root"),
+                rs.getString("backup_dir"),
+                // 读不出来就当作空清单：回写审计是事后查看用的，一条读不动不该让详情页整体 500
+                json.readList(rs.getString("files"), SourceWriteBack.AppliedFile.class)
+                        .orElse(List.of()),
+                rs.getInt("file_count"),
+                toInstant(rs.getTimestamp("applied_at"))), taskId);
     }
 
     // ------------------------------------------------------------------

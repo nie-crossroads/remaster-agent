@@ -8,6 +8,7 @@ import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.common.domain.PatchRecord;
+import com.remasteragent.common.domain.SourceWriteBack;
 import com.remasteragent.common.domain.TaskStatus;
 import com.remasteragent.common.domain.TraceSpan;
 
@@ -272,6 +273,22 @@ public interface TaskStore {
     long insertPatch(long nodeId, String filePath, String diff, String originalHash);
 
     List<PatchRecord> findPatches(long taskId);
+
+    // ------------------------------------------------------------------
+    // 变更回写审计（阶段 4 收尾）
+    // ------------------------------------------------------------------
+
+    /**
+     * 落一行「产出被写回源工程」的审计记录，返回自增 id。
+     *
+     * @param filesJson  文件清单的 JSON 数组（{@code [{filePath, bytes, sha256}]}）
+     * @param fileCount  文件数，单独存一列便于列表直接显示
+     */
+    long insertWriteBack(long taskId, String projectRoot, String backupDir,
+                         String filesJson, int fileCount);
+
+    /** 该任务的回写记录，按时间升序 —— 最后一条代表源工程当前所处的状态。 */
+    List<SourceWriteBack> findWriteBacks(long taskId);
 
     // ------------------------------------------------------------------
     // 成本

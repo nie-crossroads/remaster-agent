@@ -4,11 +4,13 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.type.CollectionType;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -115,6 +117,28 @@ public class JsonCodec {
             return Optional.ofNullable(mapper.readValue(json, type));
         } catch (Exception e) {
             log.warn("JSON 反序列化失败，已降级为空: {}", type.getSimpleName(), e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 反序列化 JSON 数组（如 {@code source_write_back.files}、checkpoint 里的清单字段）。
+     *
+     * <p>为什么单独开一个方法而不是让调用方拿 {@link #mapper()} 自己拼 {@code TypeReference}：
+     * 泛型集合的读法每处都能写出细微不同（元素类型擦除后收到 LinkedHashMap 之类的坑），
+     * 集中一处才能保证「同一列 JSON 在写与读两端形状一致」——
+     * 这与 checkpoint 那条纪律是同一个道理：形状即契约。
+     */
+    public <T> Optional<List<T>> readList(String json, Class<T> elementType) {
+        if (json == null || json.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            CollectionType type = mapper.getTypeFactory()
+                    .constructCollectionType(List.class, elementType);
+            return Optional.ofNullable(mapper.readValue(json, type));
+        } catch (Exception e) {
+            log.warn("JSON 数组反序列化失败，已降级为空: {}", elementType.getSimpleName(), e);
             return Optional.empty();
         }
     }

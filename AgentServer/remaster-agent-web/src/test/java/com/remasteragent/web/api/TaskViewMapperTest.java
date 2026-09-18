@@ -8,6 +8,7 @@ import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.common.domain.PatchRecord;
+import com.remasteragent.common.domain.SourceWriteBack;
 import com.remasteragent.common.domain.TaskMetrics;
 import com.remasteragent.common.domain.TaskStatus;
 import com.remasteragent.core.codec.JsonCodec;
@@ -44,7 +45,7 @@ class TaskViewMapperTest {
 
         TaskDetailView detail = mapper.toDetail(
                 task(), List.of(planNode(1L, NodeStatus.SUCCEEDED, plan)), List.of(),
-                TaskStore.CostSummary.empty(), false, null, null);
+                TaskStore.CostSummary.empty(), false, null, null, null);
 
         assertTrue(detail.plan() != null);
         assertEquals("把遗留的订单统计模块迁到 java.time", detail.plan().summary());
@@ -65,7 +66,7 @@ class TaskViewMapperTest {
 
         TaskDetailView detail = mapper.toDetail(
                 task(), List.of(planNode(1L, NodeStatus.SUCCEEDED, plan)), List.of(),
-                TaskStore.CostSummary.empty(), true, null, null);
+                TaskStore.CostSummary.empty(), true, null, null, null);
 
         assertTrue(detail.plan() != null);
         assertTrue(detail.plan().approved());
@@ -85,7 +86,7 @@ class TaskViewMapperTest {
                 planNode(3L, NodeStatus.SUCCEEDED, newPlan));
 
         TaskDetailView detail = mapper.toDetail(task(), nodes, List.of(),
-                TaskStore.CostSummary.empty(), false, null, null);
+                TaskStore.CostSummary.empty(), false, null, null, null);
 
         assertTrue(detail.plan() != null);
         assertEquals("新计划", detail.plan().summary(),
@@ -101,7 +102,7 @@ class TaskViewMapperTest {
                         NodeStatus.SUCCEEDED, 0, null, null, Instant.now(), Instant.now()));
 
         TaskDetailView detail = mapper.toDetail(task(), nodes, List.of(),
-                TaskStore.CostSummary.empty(), false, null, null);
+                TaskStore.CostSummary.empty(), false, null, null, null);
 
         assertNull(detail.plan());
     }
@@ -112,7 +113,7 @@ class TaskViewMapperTest {
                 NodeStatus.SUCCEEDED, 0, "{ 这不是 JSON", null, Instant.now(), Instant.now());
 
         TaskDetailView detail = mapper.toDetail(task(), List.of(broken), List.of(),
-                TaskStore.CostSummary.empty(), false, null, null);
+                TaskStore.CostSummary.empty(), false, null, null, null);
 
         // 详情接口仍应正常返回，只是计划区域没东西 —— 历史任务的旧格式不该让整页打不开
         assertNull(detail.plan());
@@ -130,7 +131,7 @@ class TaskViewMapperTest {
                 rewriteNode(12L, 1));
 
         TaskDetailView detail = mapper.toDetail(task(), nodes,
-                List.of(patch(11L), patch(12L)), TaskStore.CostSummary.empty(), false, null, null);
+                List.of(patch(11L), patch(12L)), TaskStore.CostSummary.empty(), false, null, null, null);
 
         assertEquals(2, detail.patches().size());
         assertEquals(0, detail.patches().get(0).attempt());
@@ -144,7 +145,7 @@ class TaskViewMapperTest {
         // 补丁与节点是同一事务写进去的，正常不会缺；但历史数据可能缺。
         // 降级为 0 而不是抛异常：为一个标签显示「第 1 轮」而让整页打不开，代价不对等。
         TaskDetailView detail = mapper.toDetail(task(), List.of(), List.of(patch(99L)),
-                TaskStore.CostSummary.empty(), false, null, null);
+                TaskStore.CostSummary.empty(), false, null, null, null);
 
         assertEquals(1, detail.patches().size());
         assertEquals(0, detail.patches().get(0).attempt());
@@ -163,7 +164,7 @@ class TaskViewMapperTest {
                 Instant.now(), null);
 
         TaskDetailView detail = mapper.toDetail(task(), List.of(gateNode), List.of(),
-                TaskStore.CostSummary.empty(), false, gate, null);
+                TaskStore.CostSummary.empty(), false, gate, null, null);
 
         assertTrue(detail.gate() != null);
         assertEquals(5L, detail.gate().id());
@@ -177,7 +178,7 @@ class TaskViewMapperTest {
     @Test
     void 没有等待中的门禁时门禁字段为空() {
         TaskDetailView detail = mapper.toDetail(task(), List.of(), List.of(),
-                TaskStore.CostSummary.empty(), false, null, null);
+                TaskStore.CostSummary.empty(), false, null, null, null);
 
         // 前端据此不渲染评审卡片 —— 空壳对象会让它以为有一道待办
         assertNull(detail.gate());
@@ -206,6 +207,40 @@ class TaskViewMapperTest {
 
         assertNull(view.runDurationMs());
         assertEquals(1_000L, view.metrics().durationMs(), "端到端仍是存储里的那个值");
+    }
+
+    // ------------------------------------------------------------------
+    // 已回写留痕
+    // ------------------------------------------------------------------
+
+    @Test
+    void 从没回写过时回写留痕为空() {
+        TaskDetailView detail = mapper.toDetail(task(), List.of(), List.of(),
+                TaskStore.CostSummary.empty(), false, null, null, null);
+
+        // 前端据此不渲染「已回写」区块 —— 空壳对象会让人以为写过一次
+        assertNull(detail.writeBack());
+    }
+
+    @Test
+    void 回写留痕被摊平且件数取写回时点的计数() {
+        Instant appliedAt = Instant.now();
+        // fileCount=3 而明细只有 1 条：老数据里明细可能缺失。计数才是「当时真写了几份」，
+        // 界面若退化成显示 0，用户会以为回写没生效
+        SourceWriteBack audit = new SourceWriteBack(1L, 7L, "E:/demo", "E:/backups/task-7",
+                List.of(new SourceWriteBack.AppliedFile("src/main/java/Demo.java", 42L, "abc123")),
+                3, appliedAt);
+
+        TaskDetailView detail = mapper.toDetail(task(), List.of(), List.of(),
+                TaskStore.CostSummary.empty(), false, null, null, audit);
+
+        assertTrue(detail.writeBack() != null);
+        assertEquals(3, detail.writeBack().fileCount());
+        assertEquals("E:/backups/task-7", detail.writeBack().backupDir());
+        assertEquals(appliedAt, detail.writeBack().appliedAt());
+        assertEquals(1, detail.writeBack().files().size());
+        assertEquals("abc123", detail.writeBack().files().get(0).sha256(),
+                "留痕里的哈希是写回后的指纹，事后可核对磁盘上这份是不是当时写的");
     }
 
     // ------------------------------------------------------------------

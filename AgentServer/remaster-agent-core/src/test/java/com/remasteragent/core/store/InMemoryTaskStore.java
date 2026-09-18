@@ -8,8 +8,10 @@ import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.common.domain.PatchRecord;
+import com.remasteragent.common.domain.SourceWriteBack;
 import com.remasteragent.common.domain.TaskStatus;
 import com.remasteragent.common.domain.TraceSpan;
+import com.remasteragent.core.codec.JsonCodec;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -48,11 +50,13 @@ public final class InMemoryTaskStore implements TaskStore {
     private final Set<Long> approvedPlans = new java.util.LinkedHashSet<>();
     private final Map<Long, HumanGate> gates = new LinkedHashMap<>();
     private final List<TraceSpan> spans = new ArrayList<>();
+    private final List<SourceWriteBack> writeBacks = new ArrayList<>();
 
     private long taskSeq = 0;
     private long nodeSeq = 0;
     private long patchSeq = 0;
     private long gateSeq = 0;
+    private long writeBackSeq = 0;
 
     // ------------------------------------------------------------------
     // 任务
@@ -393,6 +397,29 @@ public final class InMemoryTaskStore implements TaskStore {
     public List<PatchRecord> findPatches(long taskId) {
         Set<Long> nodeIds = findNodes(taskId).stream().map(DagNode::id).collect(Collectors.toSet());
         return patches.stream().filter(patch -> nodeIds.contains(patch.nodeId())).toList();
+    }
+
+    // ------------------------------------------------------------------
+    // 变更回写审计
+    // ------------------------------------------------------------------
+
+    @Override
+    public long insertWriteBack(long taskId, String projectRoot, String backupDir,
+                                String filesJson, int fileCount) {
+        long id = ++writeBackSeq;
+        // 与生产实现同一语义：files 在库里是 JSONB，这里存成解析后的对象列表 ——
+        // 单测关心的是「清单能被读回来」，不是 JSON 文本长什么样
+        List<SourceWriteBack.AppliedFile> files = new JsonCodec()
+                .readList(filesJson, SourceWriteBack.AppliedFile.class)
+                .orElse(List.of());
+        writeBacks.add(new SourceWriteBack(id, taskId, projectRoot, backupDir,
+                files, fileCount, Instant.now()));
+        return id;
+    }
+
+    @Override
+    public List<SourceWriteBack> findWriteBacks(long taskId) {
+        return writeBacks.stream().filter(w -> w.taskId() == taskId).toList();
     }
 
     @Override

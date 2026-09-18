@@ -104,8 +104,8 @@ public class TaskController {
                     input.entryFile(), targetJdk, name);
             span.setAttribute("task.id", taskId);
             enqueueOrFail(taskId, input, TracePropagation.currentTraceparent());
-            log.info("任务 #{} 已创建并投递: 任务名={} 工程={} 目标文件={} JDK={}",
-                    taskId, name, input.projectRoot(), input.entryFile(), targetJdk);
+            log.info("任务 #{} 已创建并投递: 任务名={} 工程={} 目标={} JDK={}",
+                    taskId, name, input.projectRoot(), describeTarget(input), targetJdk);
 
             TaskView view = queryService.taskSummary(taskId);
             TraceTracer.endOk(span);
@@ -132,6 +132,16 @@ public class TaskController {
     }
 
     /**
+     * 入口文件的可读描述。
+     *
+     * <p>整仓升级模式下没有入口文件，日志里直接打 {@code null} 会让人以为「漏传了参数」，
+     * 于是去翻调用方代码 —— 而它本来就是合法的任务形态。
+     */
+    private static String describeTarget(ProjectPathValidator.ResolvedInput input) {
+        return input.entryFile() == null ? "整仓升级（全仓 pom）" : input.entryFile();
+    }
+
+    /**
      * 投递任务；失败时把任务显式标记为 FAILED 再抛出 —— <b>绝不留悬空的 PENDING</b>。
      *
      * <p>「先落库拿 id、再投队列」这两步跨了 PostgreSQL 和 Redis，没有共同事务可包。
@@ -149,8 +159,8 @@ public class TaskController {
         } catch (Exception e) {
             String reason = "任务投递失败（队列不可用）: " + e.getMessage();
             taskStore.updateTaskStatus(taskId, TaskStatus.FAILED, reason);
-            log.error("任务 #{} 投递队列失败，已标记为 FAILED: 工程={} 目标文件={}",
-                    taskId, input.projectRoot(), input.entryFile(), e);
+            log.error("任务 #{} 投递队列失败，已标记为 FAILED: 工程={} 目标={}",
+                    taskId, input.projectRoot(), describeTarget(input), e);
             throw new QueueUnavailableException(
                     "任务已创建（id=" + taskId + "）但投递到队列失败，已标记为 FAILED。"
                             + "请确认 Redis 可用后重新提交。原因: " + e.getMessage(), e);

@@ -20,6 +20,11 @@ import java.util.List;
  * <p>{@code gate} 可为 null —— 仅当任务此刻卡在一道等待人工的门禁上时才有值。
  * 它与 {@code plan} 的区别是：计划是「已经发生过的事」（PLAN 的产出，一直在），
  * 门禁是「正挡在路上、要你去处理的事」（处理完就没了）。
+ *
+ * <p>{@code writeBack} 可为 null —— 仅当这个任务<b>已经被回写过</b>时才有值。
+ * 名字用过去式语义（「已回写」而非「待回写」）是刻意的：详情页回答的是
+ * 「这个任务对源工程做了什么」，而「现在能不能回写」是一次要现场检查工作区
+ * （git status）的动作，挂在另一个端点上按需触发，不随详情页每次刷新都跑一遍。
  */
 public record TaskDetailView(
         TaskView task,
@@ -27,7 +32,8 @@ public record TaskDetailView(
         List<PatchView> patches,
         CostView cost,
         PlanView plan,
-        GateView gate
+        GateView gate,
+        WriteBackView writeBack
 ) {
 
     /**
@@ -145,5 +151,32 @@ public record TaskDetailView(
             Instant createdAt,
             Instant decidedAt
     ) {
+    }
+
+    /**
+     * 「这个任务已经回写过源工程」的事实 —— 只读留痕，不承载「能不能再写一次」的判断。
+     *
+     * <p>为什么要单独展示它、而不是只在写回成功后弹个提示：回写是本项目里<b>唯一会改动
+     * 人原有文件</b>的动作，用户隔天回到详情页时最需要确认的三件事是「写进去了吗」
+     * 「写的是哪几个文件」「出事了去哪找原件」。这三件事都必须能重新查到，
+     * 而不是依赖当时那一次弹窗。
+     *
+     * @param projectRoot 被写回的源工程根目录（写回当时的绝对路径）
+     * @param backupDir   备份目录；回滚就是把这里的文件拷回原位
+     * @param fileCount   写回的文件数
+     * @param files       文件清单，带写回<b>后</b>的 sha256，可核对磁盘上现在这份是不是当时写的
+     * @param appliedAt   写回时间
+     */
+    public record WriteBackView(
+            String projectRoot,
+            String backupDir,
+            int fileCount,
+            List<AppliedFileView> files,
+            Instant appliedAt
+    ) {
+    }
+
+    /** 一个已被写回的文件。 */
+    public record AppliedFileView(String filePath, long bytes, String sha256) {
     }
 }

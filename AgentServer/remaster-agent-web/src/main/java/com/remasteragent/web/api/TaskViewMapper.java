@@ -8,6 +8,7 @@ import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeStatus;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.common.domain.PatchRecord;
+import com.remasteragent.common.domain.SourceWriteBack;
 import com.remasteragent.common.domain.TaskMetrics;
 import com.remasteragent.core.codec.JsonCodec;
 import com.remasteragent.core.store.TaskStore;
@@ -71,7 +72,8 @@ public class TaskViewMapper {
 
     public TaskDetailView toDetail(MigrationTask task, List<DagNode> nodes,
                                    List<PatchRecord> patches, TaskStore.CostSummary cost,
-                                   boolean planApproved, HumanGate openGate, Long runDurationMs) {
+                                   boolean planApproved, HumanGate openGate, Long runDurationMs,
+                                   SourceWriteBack writeBack) {
         // 补丁表里只有 node_id，轮次在节点上。回退重写会让同一个文件产生多份补丁，
         // 只靠文件名分不出先后 —— 在这里就把轮次并进补丁视图，前端不必再去 join 节点。
         Map<Long, Integer> attemptByNodeId = new HashMap<>();
@@ -89,7 +91,30 @@ public class TaskViewMapper {
                 new TaskDetailView.CostView(
                         cost.calls(), cost.promptTokens(), cost.completionTokens(), cost.totalCost()),
                 toPlan(nodes, planApproved),
-                toGate(openGate, nodes));
+                toGate(openGate, nodes),
+                toWriteBack(writeBack));
+    }
+
+    /**
+     * 「已回写过」的留痕；从没回写过时返回 null。
+     *
+     * <p>{@code latestWriteBack} 已经在 core 里取过「最后一条」，这里只做形状转换 ——
+     * 转换层只做「已加载的数据 → 对外形状」，自己发查询就会在没人注意的情况下长出 N+1。
+     */
+    private static TaskDetailView.WriteBackView toWriteBack(SourceWriteBack writeBack) {
+        if (writeBack == null) {
+            return null;
+        }
+        List<TaskDetailView.AppliedFileView> files = writeBack.files() == null ? List.of()
+                : writeBack.files().stream()
+                .map(file -> new TaskDetailView.AppliedFileView(
+                        file.filePath(), file.bytes(), file.sha256()))
+                .toList();
+        // fileCount 是写回时点上的数；files 是明细。老数据里明细可能为空而计数非 0，
+        // 这时以计数为准（它才是当时真正写了几份），不要让界面显示成「0 个文件」
+        int count = writeBack.fileCount() > 0 ? writeBack.fileCount() : files.size();
+        return new TaskDetailView.WriteBackView(
+                writeBack.projectRoot(), writeBack.backupDir(), count, files, writeBack.appliedAt());
     }
 
     /**

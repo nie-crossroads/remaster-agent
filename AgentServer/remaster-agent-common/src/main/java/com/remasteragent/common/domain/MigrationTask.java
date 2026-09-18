@@ -8,9 +8,21 @@ import java.time.Instant;
  * <p>阶段 1 的输入是「本地可信工程目录 + 目标文件」，还不支持直接拉远端仓库；
  * 阶段 2 接入 AST 切块与代码 RAG 后会扩展成整仓迁移。
  *
+ * <h2>两种任务形态由 {@code entryFile} 区分</h2>
+ * <ul>
+ *   <li><b>非空</b> —— 常规迁移：改写这一个文件，编排走
+ *       ANALYZE → REWRITE →（GATE）→ VERIFY，必要时在最前面插 POM_REWRITE。</li>
+ *   <li><b>null</b> —— <b>整仓升级</b>：把全仓 {@code pom.xml} 的编译级别抬到目标 JDK，
+ *       <b>不做任何代码改写</b>。拓扑是 POM_REWRITE →（GATE）→ VERIFY，连 ANALYZE 都不跑 ——
+ *       它读的是入口文件，这里没有；而它顺带做的工程索引对本模式毫无用处（POM_REWRITE 与
+ *       VERIFY 都不调模型），跑一遍只是白烧 embedding 调用。</li>
+ * </ul>
+ * <p>两者不是「填没填」的差别，是两个合法的任务类型，所以数据层用 NULL 而不是空串表达 ——
+ * 空串会被当成「填了个空路径」，那是要报错的输入。
+ *
  * @param id          自增主键
  * @param projectRoot 被测工程的根目录（含 pom.xml），沙箱执行时会被复制出去，绝不原地修改
- * @param entryFile   本轮要改写的单个文件，相对 projectRoot 的路径
+ * @param entryFile   本轮要改写的单个文件，相对 projectRoot 的路径；<b>null = 整仓升级模式</b>
  * @param targetJdk   目标 JDK 版本，阶段 1 固定 21
  * @param status      任务状态
  * @param metricsJson 完成后的指标汇总（JSON），对应 JSONB 列；未完成时为空
