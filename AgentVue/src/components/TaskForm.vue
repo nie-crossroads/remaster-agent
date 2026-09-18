@@ -43,7 +43,15 @@ const form = reactive<FormState>({
 const viewTask = computed(() => tasks.currentDetail?.task ?? null)
 const viewName = computed(() => viewTask.value?.name ?? '')
 const viewProjectRoot = computed(() => viewTask.value?.projectRoot ?? '')
-const viewEntryFile = computed(() => viewTask.value?.entryFile ?? '')
+/**
+ * 查看模式下的入口文件展示值。
+ *
+ * 留空不是「没填」，而是一种任务形态：整仓升级（只抬全仓 pom 的编译级别，不改代码）。
+ * 直接渲染成空白会让人以为数据缺失，所以这里换成一句明确的说明。
+ */
+const viewEntryFileText = computed(
+  () => viewTask.value?.entryFile || '（整仓升级：只升编译级别，不改代码）',
+)
 const viewTargetJdk = computed(() => viewTask.value?.targetJdk ?? 21)
 
 /** 表单自检 —— 给用户看的，不替后端做决定。仅在 create 模式使用。 */
@@ -61,10 +69,9 @@ function validate(): boolean {
     projectRootError.value = '看起来不是绝对路径——Windows 用 "E:/..."，Linux/Mac 用 "/..."'
     ok = false
   }
-  if (!form.entryFile.trim()) {
-    entryFileError.value = '请填写入口文件相对路径'
-    ok = false
-  } else if (form.entryFile.includes('\\')) {
+  // 入口文件可以留空 —— 那是「整仓升级」模式，所以不再要求必填，
+  // 只校验「填了的话格式对不对」。留空与填错是两件事，不能合成一条错误提示
+  if (form.entryFile.trim() && form.entryFile.includes('\\')) {
     entryFileError.value = '请用正斜杠分隔路径，例如 src/main/java/...'
     ok = false
   }
@@ -74,10 +81,13 @@ function validate(): boolean {
 async function onSubmit(): Promise<void> {
   if (!validate()) return
   const name = form.name.trim()
+  const entryFile = form.entryFile.trim()
   const req: CreateTaskRequest = {
     projectRoot: form.projectRoot.trim(),
-    entryFile: form.entryFile.trim(),
     targetJdk: form.targetJdk,
+    // 留空就不下发这个字段：后端存 null，编排层据此铺「POM_REWRITE → VERIFY」，
+    // 一步代码改写都不做。下发空串则会被后端当成「填了个空路径」而报错
+    ...(entryFile ? { entryFile } : {}),
     // 留空则不下发该字段（后端存 null，列表回退显示 #id）
     ...(name ? { name } : {}),
   }
@@ -129,15 +139,20 @@ async function onSubmit(): Promise<void> {
       </el-form-item>
 
       <el-form-item
-        label="入口文件（相对项目根）"
+        :label="mode === 'create' ? '入口文件（相对项目根，可留空）' : '入口文件（相对项目根）'"
         :error="mode === 'create' ? (entryFileError ?? undefined) : undefined"
       >
         <el-input
           v-if="mode === 'create'"
           v-model="form.entryFile"
           placeholder="src/main/java/com/example/Foo.java"
+          clearable
         />
-        <el-input v-else :model-value="viewEntryFile" disabled />
+        <el-input v-else :model-value="viewEntryFileText" disabled />
+        <!-- 留空的语义必须显式写出来：它不是「这个字段没填」，而是另一种任务形态 -->
+        <div v-if="mode === 'create'" class="form-hint">
+          留空 = 整仓升级：只把全仓 pom.xml 的编译级别抬到目标 JDK，不改任何代码
+        </div>
       </el-form-item>
 
       <el-form-item label="目标 JDK">
@@ -168,3 +183,12 @@ async function onSubmit(): Promise<void> {
     </el-form>
   </div>
 </template>
+
+<style scoped>
+.form-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
+}
+</style>

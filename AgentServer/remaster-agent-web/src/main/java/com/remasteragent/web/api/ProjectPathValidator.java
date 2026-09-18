@@ -30,7 +30,7 @@ public final class ProjectPathValidator {
      * 校验后的输入。
      *
      * @param projectRoot 规范化后的绝对路径
-     * @param entryFile   规范化后的相对路径，<b>统一为正斜杠</b>
+     * @param entryFile   规范化后的相对路径，<b>统一为正斜杠</b>；<b>null = 整仓升级模式</b>（没有入口文件）
      */
     public record ResolvedInput(Path projectRoot, String entryFile) {
     }
@@ -41,10 +41,17 @@ public final class ProjectPathValidator {
     /**
      * 校验工程根目录与目标文件。
      *
+     * <p>入口文件可以留空 —— 那是「整仓升级」模式（只抬全仓 pom 的编译级别，不改代码）。
+     * 注意留空与填错要分开处理：留空是合法任务形态，所以在这里直接放行；
+     * 填了但不对（越界、不存在、非 .java）仍旧一律拒绝，下面那些检查一条都不放松。
+     *
      * @throws IllegalArgumentException 任一检查不通过；消息面向使用者，会直接返回给前端
      */
     public static ResolvedInput validate(String rawProjectRoot, String rawEntryFile) {
         Path projectRoot = resolveProjectRoot(rawProjectRoot);
+        if (rawEntryFile == null || rawEntryFile.isBlank()) {
+            return new ResolvedInput(projectRoot, null);
+        }
         String entryFile = resolveEntryFile(projectRoot, rawEntryFile);
         return new ResolvedInput(projectRoot, entryFile);
     }

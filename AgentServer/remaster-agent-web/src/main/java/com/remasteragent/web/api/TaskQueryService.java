@@ -1,6 +1,7 @@
 package com.remasteragent.web.api;
 
 import com.remasteragent.common.domain.MigrationTask;
+import com.remasteragent.common.domain.SourceWriteBack;
 import com.remasteragent.common.domain.TraceSpan;
 import com.remasteragent.core.store.TaskStore;
 import com.remasteragent.web.api.dto.TaskDetailView;
@@ -65,7 +66,14 @@ public class TaskQueryService {
                 taskStore.isPlanApproved(taskId),
                 // 当前等待中的门禁（没有则为 null）—— 评审卡片只在它非空时出现
                 taskStore.findOpenGate(taskId).orElse(null),
-                runDurationMs(taskStore.findTraceSpans(taskId)));
+                runDurationMs(taskStore.findTraceSpans(taskId)),
+                // 最近一次回写留痕（从没回写过则为 null）—— 只读事实，不在这里做任何工作区检查
+                latestWriteBack(taskStore.findWriteBacks(taskId)));
+    }
+
+    /** 取最近一次回写记录；没有则为 null。列表按插入序返回，故最后一条即最近一次。 */
+    private static SourceWriteBack latestWriteBack(List<SourceWriteBack> writeBacks) {
+        return writeBacks.isEmpty() ? null : writeBacks.get(writeBacks.size() - 1);
     }
 
     /** 任务概要，不存在时抛 404。 */

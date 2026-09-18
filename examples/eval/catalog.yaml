@@ -348,6 +348,53 @@ cases:
     title: 吞异常的「找不到就返回 null」→ Optional
     patterns: [exception-swallow, legacy-collections]
 
+  # ==================================================================
+  # multimodule-legacy —— 整仓 JDK 升级（多模块，编译级别真的停在 8）
+  # ==================================================================
+  # 与其他全部正样本的决定性区别：上面每个工程的 pom 都**刻意钉死 release=21**，
+  # 考的是「源码写法现代化」；本工程的编译级别**就是 JDK 8**，考的是
+  # 「构建描述本身也得升」—— 也就是 POM_REWRITE 节点。
+  #
+  # 为什么必须有这么一条：模型按提示词现代化时产出的 text block / List.of / var
+  # 都是 JDK 9+ 的语法与 API，在 --release 8 下会被 javac 直接拒绝，
+  # 而报错信息（"文本块是预览特性"/"找不到符号: List.of"）看起来像模型写错了。
+  # 没有这条用例，「整仓升级」只是代码里的一段逻辑，无从证明它真的生效。
+  #
+  # 两种声明写法刻意并存（改写器必须两种都认，否则会留下没升干净的模块）：
+  #   · 根 pom          —— java.version=1.8 属性 + 四处 ${java.version} 引用
+  #   · legacy-report   —— maven.compiler.release=8（新式单属性）
+  #   · legacy-core     —— 什么都不写，继承根 pom
+
+  - id: multimodule-core-tally
+    project: examples/eval/multimodule-legacy
+    entryFile: legacy-core/src/main/java/com/example/mm/core/PriceTally.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 整仓升级：子模块未声明编译级别（继承根 pom 的 java.version=1.8）
+    patterns: [build-java-version, legacy-collections, explicit-boxing, iterator-loop]
+    notes: >
+      legacy-core 自己不声明任何编译级别 —— 「什么都不写的子模块」是最容易被升级漏掉、
+      又最容易在模型产出新语法时炸掉的一类。目标文件里
+      Collections.unmodifiableList(Arrays.asList(...)) 的自然现代化结果是 List.of(...)（JDK 9+），
+      所以这条用例能真正逼出「编译级别必须先升」这个前提。
+      行为契约只断言 3 条可观测结果（长度 / 顺序 / 只读），不管内部用什么实现。
+
+  - id: multimodule-report-writer
+    project: examples/eval/multimodule-legacy
+    entryFile: legacy-report/src/main/java/com/example/mm/report/StatementWriter.java
+    targetJdk: 21
+    expect: SUCCEEDED
+    ready: true
+    title: 整仓升级：子模块用 maven.compiler.release=8 单独声明
+    patterns: [build-pom-release, manual-padding, string-concat, text-block]
+    notes: >
+      legacy-report 用 maven.compiler.release 声明级别，与根 pom 的 source/target 三元组并存 ——
+      两种写法都要被改写器认出来。目标文件是手工 while 补空格对齐 + 逐行 append("\n")，
+      最自然的现代化结果就是 text block（JDK 15+），而它在 --release 8 下是语法错误。
+      测试用 String.format("%-12s%8s", ...) 现算期望行，不硬编码空白数量，
+      并断言「末尾不带换行」——那是契约的一部分，text block 的尾部空白最容易在这里翻车。
+
   - id: negative-api-leak
     project: examples/eval/negative/unfixable-api-leak
     entryFile: src/main/java/com/example/negative/ApiLeak.java

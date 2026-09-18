@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  multimodule-legacy —— 「整仓 JDK 升级」的验收靶子。
+
+  与其他样本工程最关键的区别：本工程的编译级别**就是 JDK 8**（而且刻意用了两种不同的
+  声明写法），所以它的现代化必须先改构建描述，然后才谈得上改源码。
+
+  为什么其他样本刻意钉 release=21 而这个不钉：那批样本考的是「源码写法现代化」，
+  把 release 钉在 21 是为了避免「模型产出 text block 被 javac 拒绝」这种环境自造的陷阱；
+  本工程反过来，正是要考「构建描述本身也得升」—— 它对应 POM_REWRITE 节点。
+
+  声明写法的两种形态（都要被改写器认出来）：
+    · 根 pom：老式三元组 —— java.version 属性 + maven.compiler.source/target 引用它
+      （Spring Initializr 2.x 的经典形状；引用处是 ${...}，改写器必须跳过引用、只改属性值）
+    · legacy-report 子模块：新式单属性 —— maven.compiler.release
+
+  依赖坐标的升级（Spring Boot 2 → 3、javax → jakarta）不在本工程的范围内：
+  那是「跨文件的批改写」，需要编排层先有批语义。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example.mm</groupId>
+    <artifactId>multimodule-legacy</artifactId>
+    <version>1.0.0</version>
+    <packaging>pom</packaging>
+    <name>multimodule-legacy</name>
+    <description>多模块遗留工程样例：编译级别停在 JDK 8，用于验证整仓升级（POM_REWRITE）</description>
+
+    <modules>
+        <module>legacy-core</module>
+        <module>legacy-report</module>
+    </modules>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- 老式写法：一个版本属性被下面两处引用。改写器应改这里的值、跳过 ${java.version} 引用 -->
+        <java.version>1.8</java.version>
+        <maven.compiler.source>${java.version}</maven.compiler.source>
+        <maven.compiler.target>${java.version}</maven.compiler.target>
+
+        <junit.version>5.12.2</junit.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter</artifactId>
+                <version>${junit.version}</version>
+                <scope>test</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!-- 版本显式钉死：评测结果必须可复现，不能让「换个插件版本」改变结论 -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.14.1</version>
+                    <!--
+                      老式写法之二：把级别再显式写进插件配置。
+                      这里同样是 ${java.version} 引用 —— 改写器不该把它替换成字面量，
+                      否则「属性改了、插件配置被改成硬编码」会让后续再调整级别时漏改一处。
+                    -->
+                    <configuration>
+                        <source>${java.version}</source>
+                        <target>${java.version}</target>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>3.5.6</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

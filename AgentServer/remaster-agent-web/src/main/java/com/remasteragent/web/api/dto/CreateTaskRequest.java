@@ -12,7 +12,10 @@ import jakarta.validation.constraints.NotBlank;
  * 而它们会稀释掉真正想展示的东西（编排 + 验证闭环）。
  *
  * @param projectRoot 被测工程根目录的绝对路径（必须含 pom.xml）
- * @param entryFile   本轮要改写的文件，相对 projectRoot 的路径，必须以 .java 结尾
+ * @param entryFile   本轮要改写的文件，相对 projectRoot 的路径，必须以 .java 结尾。
+ *                    <b>留空 = 整仓升级模式</b>：只把全仓 pom.xml 的编译级别抬到 targetJdk，
+ *                    不做任何代码改写。留空与填错是两回事 —— 留空放行，填了但越界/不存在/非 .java
+ *                    照旧拒绝（见 {@code ProjectPathValidator}）
  * @param targetJdk   目标 JDK 版本，缺省 21
  * @param name        任务名（可选，仅展示用）。不强制填写以兼容评测 harness 等旧调用方
  */
@@ -20,7 +23,6 @@ public record CreateTaskRequest(
         @NotBlank(message = "projectRoot 不能为空")
         String projectRoot,
 
-        @NotBlank(message = "entryFile 不能为空")
         String entryFile,
 
         @Min(value = 17, message = "targetJdk 至少为 17")

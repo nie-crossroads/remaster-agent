@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  legacy-core —— 不声明任何编译级别，完全继承父 pom 的 ${java.version}。
+
+  一个子模块「什么都不写」是最常见的形态，也最容易在升级时被漏掉：
+  只改根 pom 看似够了（属性继承下去了），但整仓扫描必须确认每一份 pom 都在视野里 ——
+  这正是 POM_REWRITE 按深度升序遍历全部 pom.xml 的原因。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.example.mm</groupId>
+        <artifactId>multimodule-legacy</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>legacy-core</artifactId>
+    <name>legacy-core</name>
+    <description>金额汇总：集合遍历、显式装箱、字符串拼接</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+        </dependency>
+    </dependencies>
+</project>

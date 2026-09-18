@@ -1,5 +1,6 @@
 package com.remasteragent.core.engine;
 
+import com.remasteragent.common.agent.PomRewriteResult;
 import com.remasteragent.common.agent.RewriteResult;
 import com.remasteragent.common.agent.VerifyResult;
 import com.remasteragent.common.domain.DagNode;
@@ -15,6 +16,7 @@ import com.remasteragent.core.config.CoreProperties;
 import com.remasteragent.core.engine.node.AnalyzeNode;
 import com.remasteragent.core.engine.node.GateNode;
 import com.remasteragent.core.engine.node.PlanNode;
+import com.remasteragent.core.engine.node.PomRewriteNode;
 import com.remasteragent.core.engine.node.RewriteNode;
 import com.remasteragent.core.engine.node.VerifyNode;
 import com.remasteragent.core.progress.ProgressEvent;
@@ -198,7 +200,7 @@ public class DagScheduler {
 
         try {
             Path workspace = restoreWorkspace(task);
-            bootstrapDagIfAbsent(taskId);
+            bootstrapDagIfAbsent(task, workspace);
 
             // 调度主循环：每轮重新查就绪节点，因为上一轮执行可能往 DAG 里追加了新节点
             // （回退重写的 attempt+1、规划阶段动态铺进的 REWRITE/VERIFY）
@@ -295,9 +297,18 @@ public class DagScheduler {
      * <p>把拓扑选择建在「执行器是否存在」上，而不是一个开关：能力缺失时自动退化，
      * 不需要运维记得去改配置，也不会出现「配了 PLAN 却没有实现」的悬空状态。
      */
-    private void bootstrapDagIfAbsent(long taskId) {
+    private void bootstrapDagIfAbsent(MigrationTask task, Path workspace) {
+        long taskId = task.id();
         if (!taskStore.findNodes(taskId).isEmpty()) {
             log.info("任务 #{} 已有节点记录，按 checkpoint 续跑", taskId);
+            return;
+        }
+
+        // 整仓升级模式（没有入口文件）：要做的事只有一件 —— 把全仓 pom 的编译级别抬上去。
+        // 这条链刻意不含 ANALYZE：它读的就是入口文件（这里没有），而它顺带做的工程索引
+        // 对本模式毫无用处（POM_REWRITE 与 VERIFY 都不调模型），跑一遍只是白烧 embedding 调用。
+        if (task.entryFile() == null) {
+            bootstrapUpgradeOnly(task);
             return;
         }
 
@@ -309,8 +320,18 @@ public class DagScheduler {
             return;
         }
 
+        // 无 PLAN 的降级拓扑里也要先升编译级别 —— 与 PlanNode 分支保持同一顺序，
+        // 否则同一个工程「有 PLAN 时能升级、没有 PLAN 时升不上去」，是极难复现的行为差异。
+        long chainBase = analyzeId;
+        String pomReason = PomUpgradeDecision.reason(workspace, task.targetJdk()).orElse(null);
+        if (pomReason != null && executors.containsKey(NodeType.POM_REWRITE)) {
+            chainBase = taskStore.insertNode(taskId, PomRewriteNode.NODE_KEY, NodeType.POM_REWRITE,
+                    List.of(analyzeId), 0);
+            log.info("已插入编译级别升级节点（{}）", pomReason);
+        }
+
         long rewriteId = taskStore.insertNode(taskId, RewriteNode.NODE_KEY, NodeType.REWRITE,
-                List.of(analyzeId), 0);
+                List.of(chainBase), 0);
 
         // 门禁开启时把 VERIFY 挂到 GATE 之后，而不是直接挂 REWRITE：
         // 改完先停下等人看一眼补丁，批准后才进沙箱验证
@@ -324,6 +345,42 @@ public class DagScheduler {
         taskStore.insertNode(taskId, VerifyNode.NODE_KEY, NodeType.VERIFY, List.of(verifyDependency), 0);
 
         log.info("初始 DAG 已铺开，共 {} 个节点: {}", taskStore.findNodes(taskId).size(), topology);
+    }
+
+    /**
+     * 「整仓升级」模式的初始 DAG：{@code POM_REWRITE →（GATE）→ VERIFY}。
+     *
+     * <p>没有入口文件，所以既没有 ANALYZE（它读的是入口文件），也没有 REWRITE（没有改写目标）。
+     * 剩下的正是这个模式的全部内容：抬编译级别，然后在沙箱里用 {@code mvn test} 证明整仓在目标 JDK 下能跑。
+     *
+     * <p><b>缺 POM_REWRITE 执行器时直接抛异常，而不是退化铺一条别的链。</b>
+     * 这个模式的全部内容就是那一个节点 —— 退化之后任务会「什么也没做」却可能显示成功，
+     * 属于最坏的一类结果：看起来正常运行，实际上没有任何效果。宁可带着明确原因失败。
+     */
+    private void bootstrapUpgradeOnly(MigrationTask task) {
+        long taskId = task.id();
+        if (!executors.containsKey(NodeType.POM_REWRITE)) {
+            throw new IllegalStateException(
+                    "当前部署未装配 POM_REWRITE 执行器，无法执行整仓升级（任务 #" + taskId + "）");
+        }
+
+        long pomId = taskStore.insertNode(taskId, PomRewriteNode.NODE_KEY, NodeType.POM_REWRITE,
+                List.of(), 0);
+
+        // 门禁语义照旧生效：开了 requireRewriteApproval 就先停下让人看 pom 补丁。
+        // 门禁键用裸 gate（不带文件）—— 这个模式改的是全仓多份 pom，没有单个文件可点名
+        long verifyDependency = pomId;
+        String topology = "POM_REWRITE → VERIFY";
+        if (gateEnabled()) {
+            verifyDependency = taskStore.insertNode(taskId, GateNode.NODE_KEY, NodeType.GATE,
+                    List.of(pomId), 0);
+            topology = "POM_REWRITE → GATE → VERIFY";
+        }
+        taskStore.insertNode(taskId, VerifyNode.NODE_KEY, NodeType.VERIFY,
+                List.of(verifyDependency), 0);
+
+        log.info("初始 DAG 已铺开（整仓升级模式，目标 JDK {}），共 {} 个节点: {}",
+                task.targetJdk(), taskStore.findNodes(taskId).size(), topology);
     }
 
     /**
@@ -562,6 +619,12 @@ public class DagScheduler {
      * 从 checkpoint 重放改写产物 —— 多文件场景下按文件逐个重放各自「最新成功」的那一版。
      *
      * <p>单文件时退化为原来的行为（只有一个文件，取它最新成功的改写）。
+     *
+     * <p><b>POM_REWRITE 的产物也要重放</b>，理由与 {@code RewriteResult} 相同、但后果更隐蔽：
+     * pom 不在任何 REWRITE 节点的产物里，任务一旦因人工门禁/规划评审挂起再重新入队，
+     * 沙箱是重建的（{@code WorkspacePreparer.prepare} 清空重建），编译级别会悄悄退回升级前，
+     * 后续 VERIFY 于是在旧级别下编译新语法而必然失败 —— 而失败原因看起来是「代码写错了」。
+     * 这类「真因与现象错位」的坑在本文档里出现过太多次，一律用「产出带上完整内容 + 重放」堵死。
      */
     private void replaySucceededRewrites(long taskId, Path workspace) {
         Map<String, RewriteResult> latestByFile = new LinkedHashMap<>();
@@ -581,14 +644,38 @@ public class DagScheduler {
         }
 
         for (RewriteResult rewrite : latestByFile.values()) {
-            try {
-                Path target = workspace.resolve(rewrite.filePath()).normalize();
-                Files.writeString(target, rewrite.newContent(), StandardCharsets.UTF_8);
-                log.info("已从 checkpoint 重放改写产物: {} (attempt={})",
-                        rewrite.filePath(), rewrite.attempt());
-            } catch (IOException e) {
-                log.warn("重放改写产物失败，将按原始工程继续: {}", rewrite.filePath(), e);
+            writeReplayFile(workspace, rewrite.filePath(), rewrite.newContent());
+        }
+
+        for (DagNode node : taskStore.findNodes(taskId)) {
+            if (node.nodeType() != NodeType.POM_REWRITE || node.status() != NodeStatus.SUCCEEDED) {
+                continue;
             }
+            PomRewriteResult pomRewrite = json.read(node.resultJson(), PomRewriteResult.class).orElse(null);
+            if (pomRewrite == null) {
+                continue;
+            }
+            for (PomRewriteResult.FileChange change : pomRewrite.files()) {
+                writeReplayFile(workspace, change.filePath(), change.newContent());
+            }
+        }
+    }
+
+    /** 把一个重放产物写到工作目录（失败只告警：重放不是任务成立的充分条件，VERIFY 才是）。 */
+    private void writeReplayFile(Path workspace, String filePath, String content) {
+        if (filePath == null || content == null) {
+            return;
+        }
+        try {
+            Path target = workspace.resolve(filePath).normalize();
+            if (!target.startsWith(workspace)) {
+                log.warn("重放产物路径越出工作目录，已跳过: {}", filePath);
+                return;
+            }
+            Files.writeString(target, content, StandardCharsets.UTF_8);
+            log.info("已从 checkpoint 重放改写产物: {}", filePath);
+        } catch (IOException e) {
+            log.warn("重放改写产物失败，将按原始工程继续: {}", filePath, e);
         }
     }
 

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  legacy-report —— 用 maven.compiler.release 单属性声明级别（新式写法），
+  且刻意与父 pom 的老式三元组**并存**。
+
+  两种写法同时出现在一个工程里是真实项目里最常见的样子（一半模块被改过、一半没有）。
+  改写器必须两种都认：只认其中一种，"整仓升级"就会留下几个还是 JDK 8 的模块，
+  而那几个模块会在模型产出新语法时编译失败 —— 表现得像「模型改坏了」，
+  实际是构建描述没升干净。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.example.mm</groupId>
+        <artifactId>multimodule-legacy</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>legacy-report</artifactId>
+    <name>legacy-report</name>
+    <description>对账单文本渲染：手工补空格对齐与逐行拼接</description>
+
+    <properties>
+        <!-- 新式写法：单属性，父 pom 的同名 source/target 在本模块被它覆盖 -->
+        <maven.compiler.release>8</maven.compiler.release>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+        </dependency>
+    </dependencies>
+</project>
