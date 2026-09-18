@@ -7,9 +7,10 @@
  *
  * 对应后端：
  * - TaskView  → com.remasteragent.web.api.dto.TaskView
- * - TaskDetail→ TaskQueryService.taskDetail()（{task, nodes, patches, cost, plan, gate}）
+ * - TaskDetail→ TaskQueryService.taskDetail()（{task, nodes, patches, cost, plan, gate, writeBack}）
  * - PlanView  → TaskDetailView.PlanView（阶段 2 规划评审）
  * - GateView  → TaskDetailView.GateView（阶段 3 通用 GATE 门禁）
+ * - WriteBackView / WriteBackReport → TaskDetailView.WriteBackView / WriteBackReportView（变更回写）
  * - TaskTrace → TaskTraceView（阶段 3 全链路 Trace）
  * - ProgressEvent → com.remasteragent.core.progress.ProgressEvent
  */
@@ -24,7 +25,14 @@
 export type TaskStatus = 'PENDING' | 'RUNNING' | 'WAITING_HUMAN' | 'SUCCEEDED' | 'FAILED'
   | 'CANCELLED'
 
-export type NodeType = 'ANALYZE' | 'PLAN' | 'REWRITE' | 'VERIFY' | 'GATE'
+/**
+ * DAG 节点类型。
+ *
+ * `POM_REWRITE` 是「整仓 JDK 升级」的编译级别改写（改 `maven.compiler.release` 等），
+ * 它必须在所有 `REWRITE` **之前**执行 —— 否则每个文件的 verify 都会因为
+ * 「编译级别还是 8」而失败。它不调用模型，是纯文本定点替换，所以不产生补丁里的 diff 之外的东西。
+ */
+export type NodeType = 'ANALYZE' | 'PLAN' | 'POM_REWRITE' | 'REWRITE' | 'VERIFY' | 'GATE'
 
 export type NodeStatus = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED'
 
@@ -71,7 +79,15 @@ export interface Metrics {
 export interface TaskView {
   id: number
   projectRoot: string
-  entryFile: string
+  /**
+   * 入口文件（相对项目根的路径）。
+   *
+   * 为 `null` 表示**整仓升级**模式：只把全仓 `pom.xml` 的编译级别抬到 `targetJdk`，
+   * 不做任何代码改写（拓扑只有 POM_REWRITE → VERIFY）。
+   *
+   * 它不是「没填」—— 那是一种合法的任务形态。展示时不能留空，否则看不出与数据缺失的区别。
+   */
+  entryFile: string | null
   /**
    * 任务名（建单页手动输入，可选）。
    *
@@ -209,6 +225,90 @@ export interface GateView {
   decidedAt: string | null
 }
 
+/**
+ * 「变更回写」的预检报告 / 执行结果。
+ *
+ * 后端：`WriteBackReportView`。预检与执行**共用同一个形状**，前端只渲染一种卡片 ——
+ * 「先看清单再点确认」这条交互不需要两套数据结构，也就不会出现
+ * 「预检说有 3 个文件、执行后报告说 2 个」这种两边对不上的情况。
+ *
+ * ## ⚠️ 判定必须从源数据现算，**不要**指望 `ready` / `applied` 两个布尔
+ *
+ * 后端那个 record 上确实有 `ready()` / `applied()` 两个便捷方法，但它们**不是 record 组件**
+ * （名字也没有 `get`/`is` 前缀），Jackson 序列化 record 时只认组件 —— 所以线上载荷里
+ * 根本没有这两个键。后端有一条 `WriteBackReportViewShapeTest` 把这一点钉死了。
+ *
+ * 本项目在 `TaskMetrics` 上已经为此付过一次代价：派生方法序列化时全丢，
+ * 前端整体覆盖后指标面板静默清零，任务却完全正常，没有任何报错。所以这里的规矩是：
+ * **计数与时间戳永远都在，布尔结论是能被算出来的** —— 用 `utils/writeback.ts` 里的
+ * `isWriteBackReady` / `isWriteBackApplied`，不要自己写 `report.ready`。
+ */
+export interface WriteBackReport {
+  taskId: number
+  /** 源工程根目录（写回目标）。 */
+  projectRoot: string | null
+  /** 沙箱工作目录（内容来源）。 */
+  workspace: string | null
+  /** 备份目录；回滚就是把它整棵拷回去。未执行时为 null。 */
+  backupDir: string | null
+  files: WriteBackFileEntry[]
+  /** 拦路项 —— **非空即拒绝执行**，一个字节都不写。 */
+  blocked: WriteBackBlocked[]
+  /** 放行但不放心的提示（如目录不是 git 工作区）。 */
+  warnings: string[]
+  /** 建议的提交信息。写回止于工作区，提交与否由人决定。 */
+  suggestedCommitMessage: string | null
+  /** 实际写回时间；null 表示只做了预检。**这是判定「写没写」的唯一依据。** */
+  appliedAt: string | null
+}
+
+/** 一个待写回 / 已写回的文件。 */
+export interface WriteBackFileEntry {
+  filePath: string
+  bytes: number
+  sha256: string
+  /** 该文件的「改写前基线」与源工程现状是否一致。 */
+  baseOk: boolean
+}
+
+/**
+ * 回写的拦路项。
+ *
+ * `code` 是机器可判的代号（`TASK_NOT_SUCCEEDED` / `DIRTY_WORKING_TREE` / `BASE_MISMATCH` …），
+ * `message` 是给人看的、**带怎么解决**的说明。前端直接渲染 message，
+ * 不要自己按 code 编一句 —— 两处各写一份必然漂移。
+ */
+export interface WriteBackBlocked {
+  code: string
+  message: string
+}
+
+/**
+ * 「这个任务已经回写过源工程」的留痕（详情接口随详情一起返回）。
+ *
+ * 后端：`TaskDetailView.WriteBackView`。为 null 表示从没回写过。
+ *
+ * 为什么不只在上次操作成功时弹个提示：回写是本项目里**唯一会改动用户原有文件**的动作，
+ * 隔天回到详情页时最需要重新确认的是「写进去了吗 / 写了哪几个文件 / 出事了去哪找原件」，
+ * 这三件事都不能依赖当时那一次弹窗。
+ */
+export interface WriteBackView {
+  projectRoot: string | null
+  /** 回滚入口：把这里的文件拷回原位。 */
+  backupDir: string | null
+  fileCount: number
+  /** 写回**后**的 sha256，可核对磁盘上现在这份是不是当时写的。 */
+  files: WriteBackAppliedFile[]
+  appliedAt: string | null
+}
+
+/** 一个已被写回的文件。 */
+export interface WriteBackAppliedFile {
+  filePath: string
+  bytes: number
+  sha256: string
+}
+
 export interface TaskDetail {
   task: TaskView
   nodes: DagNode[]
@@ -218,6 +318,14 @@ export interface TaskDetail {
   plan: PlanView | null
   /** 门禁可为 null：只有任务此刻卡在一道等待中的人工门禁上时才有值。 */
   gate: GateView | null
+  /**
+   * 已回写留痕，可为 null（从没回写过）。
+   *
+   * 注意它只回答「**曾经**写过什么」，不回答「**现在**能不能写」——
+   * 后者要现场检查源工程工作区（git status），挂在 `/write-back` 端点上按需触发，
+   * 不随详情页每次刷新都跑一遍。
+   */
+  writeBack: WriteBackView | null
 }
 
 /**
@@ -248,7 +356,13 @@ export interface ProgressEvent {
 
 export interface CreateTaskRequest {
   projectRoot: string
-  entryFile: string
+  /**
+   * 入口文件（相对项目根的路径）。
+   *
+   * 省略 / 留空 = **整仓升级**模式：只抬全仓 `pom.xml` 的编译级别，不改任何代码。
+   * 后端据此把任务的入口文件存成 `null`，编排层再据此铺一条不含 REWRITE 的拓扑。
+   */
+  entryFile?: string | null
   targetJdk?: number
   /** 任务名（可选，仅展示用；留空则后端存 null，列表回退显示 #id）。 */
   name?: string

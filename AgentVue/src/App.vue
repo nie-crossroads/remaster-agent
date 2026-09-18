@@ -21,6 +21,7 @@ import PlanReview from '@/components/PlanReview.vue'
 import TaskForm from '@/components/TaskForm.vue'
 import TaskList from '@/components/TaskList.vue'
 import TraceTimeline from '@/components/TraceTimeline.vue'
+import WriteBackPanel from '@/components/WriteBackPanel.vue'
 import { useTasksStore } from '@/stores/tasks'
 import {
   TASK_STATUS_LABEL,
@@ -68,7 +69,10 @@ const detail = computed(() => tasks.currentDetail)
 const lastTaskHeaderLabel = computed(() => {
   const t = detail.value?.task
   if (!t) return null
-  const location = `${t.projectRoot.split(/[\\/]/).slice(-1)[0]}/${t.entryFile.split('/').pop()}`
+  const project = t.projectRoot.split(/[\\/]/).slice(-1)[0]
+  // 没有入口文件 = 整仓升级模式（只升编译级别，不改代码），标题里要看得出来
+  const target = t.entryFile ? (t.entryFile.split('/').pop() ?? t.entryFile) : '整仓升级'
+  const location = `${project}/${target}`
   // 有任务名时把它放进标题：它是用户给这次迁移起的名字，比路径更容易认
   return t.name ? `任务 #${t.id} · ${t.name} · ${location}` : `任务 #${t.id} · ${location}`
 })
@@ -164,6 +168,53 @@ async function onCancel(): Promise<void> {
   const ok = await tasks.cancelCurrentTask()
   if (ok) {
     ElMessage.success(running ? '已请求取消，等当前节点跑完即停' : '任务已取消')
+  }
+}
+
+/**
+ * 第一步：预检 —— 只查不写。
+ *
+ * 它存在的意义就是「让危险动作前面隔着一张清单」。用户按下之后什么都不会发生，
+ * 只会看到「要写哪几个文件、有没有拦路的事」，然后才轮到决定。
+ */
+async function onWriteBackPreflight(): Promise<void> {
+  const report = await tasks.preflightWriteBack()
+  if (report && report.blocked.length > 0) {
+    ElMessage.warning('预检未通过，请看清单里的拦路项')
+  }
+}
+
+/**
+ * 第二步：真正写入源工程 —— 再要一次确认。
+ *
+ * <h3>为什么清单之外还要一个弹窗</h3>
+ * 清单回答的是「写什么」，弹窗回答的是「代价是什么、怎么退回去」——
+ * 这两件事在按下不可逆按钮之前都该被说一遍。弹窗里刻意点明
+ * 「源文件会被覆盖」和「备份在哪个目录」，因为那正是用户此刻最该知道、
+ * 而清单的表格里没有的两条信息。
+ *
+ * 用 warning 而不是 error 配色：这是一次正常的、有人主动要求的操作，
+ * 不是系统出错。过了这一关，写的动作本身只写本地文件 —— 不会 commit、不会 push。
+ */
+async function onWriteBackApply(): Promise<void> {
+  const report = tasks.writeBackReport
+  if (!report) return
+  try {
+    await ElMessageBox.confirm(
+      `将用沙箱里已通过验证的版本，覆盖源工程 ${report.projectRoot ?? ''} 中的 `
+        + `${report.files.length} 个文件。原件会先备份，出错可用备份目录整棵拷回；`
+        + '此操作只写本地文件，不会替你提交或推送。',
+      '写入源工程',
+      { confirmButtonText: '确定写入', cancelButtonText: '再想想', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  const ok = await tasks.applyWriteBack()
+  if (ok) {
+    ElMessage.success('已写入源工程，备份目录见下方清单')
+  } else {
+    ElMessage.error(tasks.writeBackError ?? '写入未执行，请看清单中的拦路项')
   }
 }
 
@@ -309,6 +360,23 @@ onUnmounted(() => {
           <div class="card">
             <DiffViewer :patches="detail.patches" />
           </div>
+
+          <!--
+            回写放在补丁之后：看完了 diff 才谈得上「那就写回去」。
+            它自己是一整张卡片而不是标题栏上的一个按钮 —— 因为它必须先摆出清单
+            （写哪几个文件、有没有拦路的事），而不能让人盲签。理由见组件头部注释。
+          -->
+          <WriteBackPanel
+            :report="tasks.writeBackReport"
+            :applied="detail.writeBack"
+            :can-write-back="tasks.canWriteBack"
+            :loading="tasks.writeBackLoading"
+            :applying="tasks.writeBackApplying"
+            :error="tasks.writeBackError"
+            @preflight="onWriteBackPreflight"
+            @apply="onWriteBackApply"
+            @dismiss="tasks.clearWriteBack()"
+          />
 
           <div class="card">
             <div class="section-title">最近事件流</div>

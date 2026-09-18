@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -75,6 +76,39 @@ class ProjectPathValidatorTest {
 
         assertEquals("src/main/java/com/example/Demo.java", input.entryFile(),
                 "入库前必须归一化，否则同一个文件会有多种字符串表示，去重与比对都会出错");
+    }
+
+    // ------------------------------------------------------------------
+    // 整仓升级模式：没有入口文件
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("entryFile 为 null = 整仓升级模式：放行，且入口文件落成 null 而不是空串")
+    void nullEntryFileMeansUpgradeOnly() {
+        ProjectPathValidator.ResolvedInput input =
+                ProjectPathValidator.validate(projectRoot.toString(), null);
+
+        assertNull(input.entryFile(),
+                "必须落成 null —— 空串会在下游被当成「填了个空路径」，而这是两种不同的任务形态");
+        assertEquals(projectRoot.toAbsolutePath().normalize(), input.projectRoot());
+    }
+
+    @Test
+    @DisplayName("entryFile 为空白串也按整仓升级处理（表单清空后常传空串）")
+    void blankEntryFileMeansUpgradeOnly() {
+        assertNull(ProjectPathValidator.validate(projectRoot.toString(), "").entryFile());
+        assertNull(ProjectPathValidator.validate(projectRoot.toString(), "   ").entryFile());
+    }
+
+    @Test
+    @DisplayName("安全边界：入口文件留空不放松 projectRoot 的校验")
+    void blankEntryFileDoesNotRelaxProjectRootChecks() {
+        Path missing = tmp.resolve("no-such-project");
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                ProjectPathValidator.validate(missing.toString(), null));
+
+        assertTrue(error.getMessage().contains("projectRoot"), error.getMessage());
     }
 
     // ------------------------------------------------------------------

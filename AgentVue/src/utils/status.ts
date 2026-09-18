@@ -47,6 +47,7 @@ export const NODE_STATUS_LABEL: Record<NodeStatus, string> = {
 export const NODE_TYPE_LABEL: Record<NodeType, string> = {
   ANALYZE: '分析',
   PLAN: '规划',
+  POM_REWRITE: '构建升级',
   REWRITE: '重写',
   VERIFY: '验证',
   GATE: '人工门',
@@ -59,6 +60,7 @@ export const NODE_TYPE_LABEL: Record<NodeType, string> = {
 export const NODE_TYPE_EMOJI: Record<NodeType, string> = {
   ANALYZE: '🔍',
   PLAN: '🧭',
+  POM_REWRITE: '📦',
   REWRITE: '🛠️',
   VERIFY: '✅',
   GATE: '🚦',

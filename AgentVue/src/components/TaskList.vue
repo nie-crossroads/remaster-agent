@@ -7,7 +7,7 @@
  */
 import { computed, onMounted } from 'vue'
 
-import type { TaskStatus } from '@/api/types'
+import type { TaskStatus, TaskView } from '@/api/types'
 import { TASK_STATUS_LABEL, TASK_STATUS_TAG, formatCost, formatDurationPair } from '@/utils/status'
 
 import { useTasksStore } from '@/stores/tasks'
@@ -24,6 +24,27 @@ onMounted(() => {
 
 function isSelected(id: number): boolean {
   return tasks.currentDetail?.task.id === id
+}
+
+/**
+ * 列表第二行的目标文本 —— 没有入口文件的任务是**整仓升级**，不是「信息缺失」。
+ *
+ * 这里必须写明：否则列表里会出现几行只显示工程名的条目，看不出它和别的任务差在哪，
+ * 甚至会被当成脏数据。
+ */
+function targetText(task: TaskView): string {
+  const project = task.projectRoot.split(/[\\/]/).slice(-2).join('/')
+  return `${project}/${targetName(task)}`
+}
+
+function targetTitle(task: TaskView): string {
+  return task.entryFile
+    ? `${task.projectRoot}/${task.entryFile}`
+    : `${task.projectRoot}（整仓升级）`
+}
+
+function targetName(task: TaskView): string {
+  return task.entryFile ? (task.entryFile.split('/').pop() ?? task.entryFile) : '整仓升级'
 }
 </script>
 
@@ -76,8 +97,8 @@ function isSelected(id: number): boolean {
             {{ TASK_STATUS_LABEL[task.status] }}
           </el-tag>
         </div>
-        <div class="path" :title="task.projectRoot + '/' + task.entryFile">
-          {{ task.projectRoot.split(/[\\/]/).slice(-2).join('/') }}/{{ task.entryFile.split('/').pop() }}
+        <div class="path" :title="targetTitle(task)">
+          {{ targetText(task) }}
         </div>
         <div class="row3">
           <span>JDK {{ task.targetJdk }}</span>

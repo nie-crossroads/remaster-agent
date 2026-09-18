@@ -1,6 +1,7 @@
 package com.remasteragent.core.engine.node;
 
 import com.remasteragent.common.domain.HumanGate;
+import com.remasteragent.common.domain.MigrationTask;
 import com.remasteragent.common.domain.NodeType;
 import com.remasteragent.core.engine.NodeContext;
 import com.remasteragent.core.engine.NodeExecutor;
@@ -71,7 +72,7 @@ public class GateNode implements NodeExecutor {
         }
 
         String filePath = filePathOf(context.node().nodeKey());
-        String comment = buildComment(filePath);
+        String comment = buildComment(context.task(), filePath);
         long gateId = taskStore.insertGate(nodeId, comment);
         log.info("▶ 已挂起等待人工门禁 gate #{}（节点 {}，文件 {}）", gateId, nodeId, filePath);
         return NodeOutcome.suspend(describe(context, gateId));
@@ -82,18 +83,25 @@ public class GateNode implements NodeExecutor {
      *
      * <p>它落进 {@code human_gate.comment} 的初值（被人审批后会被覆盖成审批意见），
      * 所以措辞要能独立说明「这一步为什么停下」。
+     *
+     * <p>三种情形分开说，因为它们要人确认的东西不同：整仓升级看的是 pom 补丁、
+     * 常规改写着的是某个文件的补丁。把前者说成「已改写 xxx 文件」会让人去翻一个
+     * 这个任务根本没碰过的文件。
      */
-    private static String buildComment(String filePath) {
+    private static String buildComment(MigrationTask task, String filePath) {
         if (filePath == null || filePath.isBlank()) {
-            return "改写已完成，请确认后再继续验证";
+            return task != null && task.entryFile() == null
+                    ? "编译级别升级已完成，请确认全仓 pom 补丁后再继续验证"
+                    : "改写已完成，请确认后再继续验证";
         }
         return "已改写 " + filePath + "，请确认补丁后再继续验证";
     }
 
     /** 挂起现场描述：节点 + 文件 + 说明。调度器用它拼进度事件。 */
     private static GateSuspend describe(NodeContext context, long gateId) {
-        return new GateSuspend(gateId, context.node().id(),
-                filePathOf(context.node().nodeKey()), buildComment(filePathOf(context.node().nodeKey())));
+        String filePath = filePathOf(context.node().nodeKey());
+        return new GateSuspend(gateId, context.node().id(), filePath,
+                buildComment(context.task(), filePath));
     }
 
     /** 取节点键中 ':' 之后的部分（文件路径）；裸键返回 null。 */

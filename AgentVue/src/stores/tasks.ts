@@ -1,10 +1,11 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { approveGate as approveGateApi, approvePlan as approvePlanApi, cancelTask as cancelTaskApi, createTask, describeError, getTask, getTaskTrace, listTasks, rejectGate as rejectGateApi, rejectPlan as rejectPlanApi, retryTask as retryTaskApi } from '@/api/client'
+import { approveGate as approveGateApi, approvePlan as approvePlanApi, applyWriteBack as applyWriteBackApi, cancelTask as cancelTaskApi, createTask, describeError, getTask, getTaskTrace, listTasks, preflightWriteBack as preflightWriteBackApi, rejectGate as rejectGateApi, rejectPlan as rejectPlanApi, retryTask as retryTaskApi } from '@/api/client'
 import { openTaskEvents } from '@/api/sse'
-import type { CreateTaskRequest, ProgressEvent, TaskDetail, TaskTrace, TaskView } from '@/api/types'
+import type { CreateTaskRequest, ProgressEvent, TaskDetail, TaskTrace, TaskView, WriteBackReport } from '@/api/types'
 import { canCancelStatus, canRetryStatus } from '@/utils/status'
+import { isWriteBackApplied } from '@/utils/writeback'
 
 /**
  * 任务工作台的核心状态。
@@ -130,6 +131,19 @@ export const useTasksStore = defineStore('tasks', () => {
   const traceLoading = ref(false)
   const traceError = ref<string | null>(null)
 
+  /**
+   * 回写预检报告 —— 「假如现在点确认，会写哪几个文件、有没有拦路的」。
+   *
+   * 与 `currentDetail.writeBack`（已回写留痕）是**两件事**：前者是「现在能不能写」，
+   * 需要现场查源工程工作区（git status），所以按需触发、不随详情刷新；
+   * 后者是「过去写过什么」，是只读事实，随详情一起返回。
+   */
+  const writeBackReport = ref<WriteBackReport | null>(null)
+  const writeBackLoading = ref(false)
+  const writeBackError = ref<string | null>(null)
+  /** 回写动作进行中（与预检分开：预检是查询，回写是危险动作）。 */
+  const writeBackApplying = ref(false)
+
   /** 用于关闭当前 SSE 连接的 cleanup。 */
   let closeCurrentEvents: (() => void) | null = null
 
@@ -198,6 +212,19 @@ export const useTasksStore = defineStore('tasks', () => {
     () => currentDetail.value?.task.cancelRequested === true
       && !TERMINAL_STATUSES.has(currentDetail.value?.task.status ?? ''),
   )
+
+  /**
+   * 现在能不能回写源工程。
+   *
+   * 判据与后端预检的**第一条**同源：只有 `SUCCEEDED` 的任务才允许回写 ——
+   * 没有通过编译与单测的产出不该进源工程。这里只看这一条，是因为它是**决定按钮亮不亮**
+   * 的那一条；至于「工作区干不干净」「基线对不对」，那些必须现场查才知道，
+   * 由预检报告回答，前端拿 `report.ready` 决定「确认」按钮能不能点。
+   *
+   * 拆成两层而不是在前端把所有检查都猜一遍：猜错的后果是「按钮亮着、点下去被拒」，
+   * 但反过来把按钮藏起来会让用户完全看不到「为什么不能回写」。
+   */
+  const canWriteBack = computed(() => currentStatus.value === 'SUCCEEDED')
 
   // -------- mutations --------
 
@@ -308,6 +335,9 @@ export const useTasksStore = defineStore('tasks', () => {
     // 短暂显示另一个任务的时间轴 —— 而那上面的每一段耗时看起来都完全合理
     clearTrace()
     controlError.value = null
+    // 回写清单也属于「上一个任务」。带着它切过去，确认弹窗里会列出另一个任务要写的文件 ——
+    // 而那份清单看起来完全合理，是最危险的一类残留
+    clearWriteBack()
     // 这次 HTTP 拉取本身就是一次「刚拿到权威状态」，所以先记一次；
     // 否则刚切过来还没等到快照就会被兜底轮询抢先触发一次多余的请求。
     markEvent()
@@ -381,6 +411,7 @@ export const useTasksStore = defineStore('tasks', () => {
     // 链路数据属于「上一个任务」，必须一起清掉
     clearTrace()
     controlError.value = null
+    clearWriteBack()
     formMode.value = 'create'
   }
 
@@ -840,6 +871,71 @@ export const useTasksStore = defineStore('tasks', () => {
     traceError.value = null
   }
 
+  // -------- 变更回写（阶段 5） --------
+
+  /**
+   * 预检：拿一份「将会写哪几个文件、有没有拦路的」清单。
+   *
+   * <b>不写盘</b>。它的唯一用途是给确认弹窗提供内容 —— 用户在按确认之前，
+   * 必须能看见「要写 3 个文件到哪个目录」，以及「工作区不干净，请先 git stash」
+   * 这类必须先去处理的事。没有这张清单的确认弹窗等于让人盲签。
+   *
+   * 它同时刷新 `currentDetail`：预检里有「任务必须是 SUCCEEDED」这条，
+   * 万一别处已经改过状态，界面上那些按钮也该跟着纠偏。
+   */
+  async function preflightWriteBack(): Promise<WriteBackReport | null> {
+    const id = currentDetail.value?.task.id
+    if (id == null || writeBackLoading.value) return null
+    writeBackLoading.value = true
+    writeBackError.value = null
+    try {
+      writeBackReport.value = await preflightWriteBackApi(id)
+      return writeBackReport.value
+    } catch (e) {
+      writeBackError.value = describeError(e)
+      return null
+    } finally {
+      writeBackLoading.value = false
+    }
+  }
+
+  /**
+   * 执行回写：把沙箱里已验证过的产出落回源工程。
+   *
+   * <h3>为什么失败时不抛异常，而是把报告留在 state 里</h3>
+   * 「被拦」是一个<b>正常结果</b>（工作区不干净就是不该写），拦路项本身就是要显示给用户看的内容。
+   * 抛出去的话调用方会当成「出错了」，用户只会看到一句红字，看不到「先去 git commit」这个做法。
+   *
+   * <h3>成功后重新拉详情</h3>
+   * 回写会往 `source_write_back` 落一行，详情里的「已回写」区块要跟着出现。
+   * 这是本项目第二次遇到「动作完成后有产物、但事件流不带它」——与 REWRITE 终态要拉补丁同理，
+   * 指望兜底轮询是错的（18 秒的静默窗口会被后续的密集事件反复打断）。
+   */
+  async function applyWriteBack(): Promise<boolean> {
+    const id = currentDetail.value?.task.id
+    if (id == null || writeBackApplying.value) return false
+    writeBackApplying.value = true
+    writeBackError.value = null
+    try {
+      const report = await applyWriteBackApi(id)
+      writeBackReport.value = report
+      // appliedAt 才是「真写了」的依据 —— 后端 record 上的 applied() 不会进 JSON
+      if (isWriteBackApplied(report)) await refreshCurrentDetail()
+      return isWriteBackApplied(report)
+    } catch (e) {
+      writeBackError.value = describeError(e)
+      return false
+    } finally {
+      writeBackApplying.value = false
+    }
+  }
+
+  /** 清掉回写报告 —— 关掉确认弹窗、或切任务时必须调，否则会把上一个任务的清单带过来。 */
+  function clearWriteBack(): void {
+    writeBackReport.value = null
+    writeBackError.value = null
+  }
+
   return {
     // state
     list,
@@ -863,6 +959,10 @@ export const useTasksStore = defineStore('tasks', () => {
     trace,
     traceLoading,
     traceError,
+    writeBackReport,
+    writeBackLoading,
+    writeBackError,
+    writeBackApplying,
     // getters
     sortedList,
     hasCurrent,
@@ -872,6 +972,7 @@ export const useTasksStore = defineStore('tasks', () => {
     canCancel,
     canRetry,
     cancellingInProgress,
+    canWriteBack,
     // actions
     refreshList,
     selectTask,
@@ -885,6 +986,9 @@ export const useTasksStore = defineStore('tasks', () => {
     retryCurrentTask,
     loadTrace,
     clearTrace,
+    preflightWriteBack,
+    applyWriteBack,
+    clearWriteBack,
     teardown,
   }
 })

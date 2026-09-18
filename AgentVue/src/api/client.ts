@@ -1,5 +1,5 @@
 import axios, { AxiosError } from 'axios'
-import type { CreateTaskRequest, TaskDetail, TaskTrace, TaskView } from './types'
+import type { CreateTaskRequest, TaskDetail, TaskTrace, TaskView, WriteBackReport } from './types'
 
 /**
  * REST 客户端。
@@ -120,6 +120,37 @@ export async function retryTask(id: number): Promise<TaskView> {
  */
 export async function getTaskTrace(id: number): Promise<TaskTrace> {
   const { data } = await http.get<TaskTrace>(`/tasks/${id}/trace`)
+  return data
+}
+
+/**
+ * 变更回写的**预检** —— 只检查、不写盘。
+ *
+ * 单独一个请求，是为了让「应用到源工程」这个危险动作前面永远隔着一张清单：
+ * 人得先看见「要写 3 个文件到 /path/to/repo，工作区干净」，再决定点不点确认。
+ *
+ * 它返回 200 即使有拦路项 —— 拦路项是结果**本身的内容**（「工作区不干净，请先 git stash」），
+ * 前端直接渲染 `blocked[].message` 即可。别按 HTTP 状态码猜结果，看 `ready`。
+ */
+export async function preflightWriteBack(id: number): Promise<WriteBackReport> {
+  const { data } = await http.get<WriteBackReport>(`/tasks/${id}/write-back`)
+  return data
+}
+
+/**
+ * 变更回写**执行**：把沙箱里已经验证过的产出落回源工程。
+ *
+ * 服务端顺序是「重新预检 → 先备份 → 再覆盖 → 落审计」，
+ * 预检不过就一个字节都不写（不做「尽力而为写一部分」）。
+ *
+ * **它只写本地工作区文件，绝不 commit、绝不 push** ——
+ * 提交是 git 的语义、是人的动作，Agent 不该持有远端凭据。
+ * 建议的提交信息随报告返回（`suggestedCommitMessage`），供人直接采用。
+ *
+ * 因此前端确认弹窗必须说清「会改动你的文件」，并按危险动作配色（`type="danger"`）。
+ */
+export async function applyWriteBack(id: number): Promise<WriteBackReport> {
+  const { data } = await http.post<WriteBackReport>(`/tasks/${id}/write-back`)
   return data
 }
 
