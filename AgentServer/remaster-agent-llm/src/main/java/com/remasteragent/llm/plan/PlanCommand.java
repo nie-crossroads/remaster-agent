@@ -41,11 +41,19 @@ public record PlanCommand(
      * @param filePath    相对工程根路径
      * @param primaryType 主类型名；解析不出时为空串
      * @param symbols     符号清单（方法/字段名），用于让模型判断这个文件是否有遗留写法
+     * @param importRisks 该文件 import 了「目标 JDK 已移除的包」的风险标记
+     *                    （形如 {@code javax.annotation.Resource (JDK11移除→jakarta.annotation)}），
+     *                    空列表代表未发现移除风险。规划器据此知道哪些文件<b>必须</b>纳入迁移。
      */
     public record FileSummary(
             String filePath,
             String primaryType,
-            List<String> symbols
+            List<String> symbols,
+            List<String> importRisks
     ) {
+        /** 兼容「不带风险信号」的构造：旧调用方与测试无需改动。 */
+        public FileSummary(String filePath, String primaryType, List<String> symbols) {
+            this(filePath, primaryType, symbols, List.of());
+        }
     }
 }

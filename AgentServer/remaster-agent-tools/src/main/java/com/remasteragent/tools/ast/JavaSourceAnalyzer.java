@@ -9,6 +9,7 @@ import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.ImportDeclaration;
 import com.github.javaparser.ast.Modifier;
 import com.github.javaparser.ast.body.TypeDeclaration;
 import com.remasteragent.common.agent.AnalyzeResult;
@@ -126,6 +127,32 @@ public final class JavaSourceAnalyzer {
         }
 
         return new ParsedHeader(packageName, primaryType, symbols, types.size());
+    }
+
+    /**
+     * 抽取源文件里的所有 import 的完全限定名（不含静态导入的方法名，只取导入的类型/包）。
+     *
+     * <p>这是「全工程 JDK 移除 API 扫描」的底层能力：规划器与扫描器靠它判断一个文件是否 import 了
+     * 目标 JDK 已删除的包（如 {@code javax.xml.ws}、{@code javax.annotation}）。
+     * 比正则稳 —— 字符串字面量里的 {@code import} 字样、注释里的写法都不会被误判。
+     *
+     * @throws IllegalStateException 源码无法解析时（与 {@link #parseHeader} 同前提）
+     */
+    public static List<String> imports(String source) {
+        CompilationUnit unit = parseOrThrow(source);
+        List<String> result = new ArrayList<>();
+        for (ImportDeclaration imp : unit.getImports()) {
+            String name = imp.getNameAsString();
+            if (imp.isStatic()) {
+                // 静态导入形如 import static foo.Bar.method；只取类型部分 foo.Bar，去掉末尾的方法名
+                int lastDot = name.lastIndexOf('.');
+                if (lastDot > 0) {
+                    name = name.substring(0, lastDot);
+                }
+            }
+            result.add(name);
+        }
+        return result;
     }
 
     /**

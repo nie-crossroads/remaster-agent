@@ -55,13 +55,21 @@ public class MigrationPlanner {
                lambdas, boxed constructors (new Integer(...)), legacy collection usage, manual loops
                that can become streams ONLY when it clearly helps, etc.
             2. Do NOT include files that are already modern, test sources, or build files.
+               A file whose inventory row shows "risks: 无" AND whose symbols already use java.time /
+               modern collections is already modern — leave it out, do not burn a rewrite attempt on it.
             3. If the entry file needs changes, it MUST be included.
             4. Order matters: files that others depend on come first.
             5. Prefer a small, precise set over a large speculative one — every file you list will
                trigger a real model call and a real sandbox build.
-            6. Respond with ONLY a JSON object, no markdown fences, no extra prose:
+            6. MANDATORY — removed-API files: any inventory row whose "risks" field shows a
+               "(JDK移除)" tag imports a package that NO LONGER EXISTS in the target JDK
+               (e.g. javax.xml.ws, javax.annotation, javax.xml.bind, javax.servlet, org.omg.*).
+               Such imports fail to COMPILE and break the WHOLE build, not just that file.
+               => Every such file MUST be included in the plan, regardless of what the symbols suggest.
+                  If the entry file carries such a risk, it MUST be included even if it looks modern.
+            7. Respond with ONLY a JSON object, no markdown fences, no extra prose:
                {"summary":"<中文，1-2 句概括本次迁移的整体思路>","steps":[{"filePath":"<path exactly as given>","rationale":"<中文，1-2 句说明该文件为什么需要迁移>"}]}
-            7. If no file needs modernization, return {"summary":"...","steps":[]}.
+            8. If no file needs modernization, return {"summary":"...","steps":[]}.
 
             In the JSON, filePath MUST be copied exactly from the inventory — do not invent paths.
             """;
@@ -144,11 +152,13 @@ public class MigrationPlanner {
         StringBuilder sb = new StringBuilder();
         sb.append("Entry file: ").append(command.entryFile()).append('\n');
         sb.append("Target JDK: ").append(command.targetJdk()).append('\n');
-        sb.append("\nFile inventory (path | primary type | symbols):\n");
+        sb.append("\nFile inventory (path | primary type | symbols | risks):\n");
         for (PlanCommand.FileSummary file : command.files()) {
             sb.append("- ").append(file.filePath())
                     .append(" | ").append(file.primaryType().isBlank() ? "(no type)" : file.primaryType())
                     .append(" | ").append(String.join(", ", file.symbols()))
+                    .append(" | risks: ")
+                    .append(file.importRisks().isEmpty() ? "无" : String.join("; ", file.importRisks()))
                     .append('\n');
         }
         return sb.toString();
