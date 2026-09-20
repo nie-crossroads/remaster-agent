@@ -76,4 +76,23 @@ class CountVerifyRoundsTest {
 
         assertEquals(1, store.countVerifyRounds(taskId));
     }
+
+    @Test
+    @DisplayName("被回退重铺、最终 SKIPPED 的 VERIFY 不计入回退轮次（否则会被 reissueBatchVerify 胀穿）")
+    void skippedVerifyNodesAreExcluded() {
+        InMemoryTaskStore store = new InMemoryTaskStore();
+        long taskId = store.createTask("E:/proj", "src/main/java/com/example/A.java", 21, null);
+
+        // 批语义下：上游 REWRITE 失败会让 reissueBatchVerify 重铺多条 VERIFY，旧的被 SKIPPED。
+        // 真正跑过的是最后那条（attempt 2，SUCCEEDED）；被跳过的 0/1 绝不能算成「回退了 2 次」。
+        long v0 = store.insertNode(taskId, FILE_A, NodeType.VERIFY, List.of(), 0);
+        store.markNodeSkipped(v0, "上游 REWRITE 失败，本轮整仓 VERIFY 已跳过");
+        long v1 = store.insertNode(taskId, FILE_A, NodeType.VERIFY, List.of(), 1);
+        store.markNodeSkipped(v1, "上游 REWRITE 失败，本轮整仓 VERIFY 已跳过");
+        long v2 = store.insertNode(taskId, FILE_A, NodeType.VERIFY, List.of(), 2);
+        store.markNodeSucceeded(v2, "{}");
+
+        assertEquals(1, store.countVerifyRounds(taskId),
+                "只跑了一轮真正的 VERIFY（attempt 2），被跳过的 0/1 不计 —— 否则回退轮次会被胀穿");
+    }
 }

@@ -8,10 +8,14 @@ import com.remasteragent.core.engine.NodeContext;
 import com.remasteragent.core.engine.NodeExecutor;
 import com.remasteragent.core.engine.NodeOutcome;
 import com.remasteragent.core.engine.PomUpgradeDecision;
+import com.remasteragent.tools.pom.JakartaArtifactCatalog;
+import com.remasteragent.tools.pom.PomDependencyUpgrader;
+import com.remasteragent.tools.pom.SpringBoot3DependencyCatalog;
 import com.remasteragent.core.progress.ProgressPublisher;
 import com.remasteragent.core.progress.RetryProgressListener;
 import com.remasteragent.core.rag.SourceFiles;
 import com.remasteragent.core.store.TaskStore;
+import com.remasteragent.tools.pom.SpringBootParentUpgrader;
 import com.remasteragent.core.trace.TraceTracer;
 import com.remasteragent.llm.config.LlmProperties;
 import com.remasteragent.llm.plan.MigrationPlanner;
@@ -19,6 +23,8 @@ import com.remasteragent.llm.plan.PlanCommand;
 import com.remasteragent.llm.plan.PlanOutcome;
 import com.remasteragent.tools.ast.JavaSourceAnalyzer;
 import com.remasteragent.tools.ast.JdkRemovalScanner;
+import com.remasteragent.tools.ast.LegacyImportDetector;
+import com.remasteragent.tools.ast.Spring3BreakingApiScanner;
 import io.opentelemetry.api.trace.Span;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -70,6 +76,8 @@ public class PlanNode implements NodeExecutor {
     private final ProgressPublisher progressPublisher;
     private final TraceTracer tracer;
     private final JdkRemovalScanner removalScanner;
+    private final boolean dependencyUpgradeAvailable;
+    private final boolean parentUpgradeAvailable;
 
     /**
      * 容器里有没有 POM_REWRITE 执行器。
@@ -81,23 +89,26 @@ public class PlanNode implements NodeExecutor {
      */
     private final boolean pomRewriteAvailable;
 
-    /** 单测入口：不发布进度、不埋点，且假定没有 POM_REWRITE 执行器（退化为阶段 2 拓扑）。 */
+    /** 单测入口：不发布进度、不埋点，且假定没有 POM_REWRITE / PARENT_UPGRADE / DEPENDENCY_UPGRADE 执行器（退化为阶段 2 拓扑）。 */
     public PlanNode(TaskStore taskStore, MigrationPlanner planner, LlmProperties llmProperties,
                     CoreProperties coreProperties) {
         this(taskStore, planner, llmProperties, coreProperties, ProgressPublisher.NOOP, TraceTracer.NOOP, false,
-                JdkRemovalScanner.create());
+                JdkRemovalScanner.create(), false, false);
     }
 
     /**
      * 生产入口。进度发布口用 {@link ObjectProvider} 取（取不到退化成 NOOP），
      * 与 {@code DagScheduler} / {@code RewriteNode} 保持同一种取法。
      * 移除扫描器同样用 {@link ObjectProvider} 取，取不到退化成一个新实例（它是无状态的纯工具）。
+     * 依赖升级执行器用 {@link ObjectProvider} 取：取不到就退化成「不插该节点」，不铺出执行不了的节点。
      */
     @Autowired
     public PlanNode(TaskStore taskStore, MigrationPlanner planner, LlmProperties llmProperties,
                     CoreProperties coreProperties,
                     ObjectProvider<ProgressPublisher> publisherProvider,
                     ObjectProvider<PomRewriteNode> pomRewriteProvider,
+                    ObjectProvider<ParentUpgradeNode> parentUpgradeProvider,
+                    ObjectProvider<DependencyUpgradeNode> dependencyUpgradeProvider,
                     TraceTracer tracer,
                     ObjectProvider<JdkRemovalScanner> scannerProvider) {
         this(taskStore, planner, llmProperties, coreProperties,
@@ -108,12 +119,15 @@ public class PlanNode implements NodeExecutor {
                 pomRewriteProvider != null && pomRewriteProvider.getIfAvailable() != null,
                 scannerProvider == null
                         ? JdkRemovalScanner.create()
-                        : scannerProvider.getIfAvailable(JdkRemovalScanner::create));
+                        : scannerProvider.getIfAvailable(JdkRemovalScanner::create),
+                dependencyUpgradeProvider != null && dependencyUpgradeProvider.getIfAvailable() != null,
+                parentUpgradeProvider != null && parentUpgradeProvider.getIfAvailable() != null);
     }
 
     private PlanNode(TaskStore taskStore, MigrationPlanner planner, LlmProperties llmProperties,
                      CoreProperties coreProperties, ProgressPublisher progressPublisher,
-                     TraceTracer tracer, boolean pomRewriteAvailable, JdkRemovalScanner removalScanner) {
+                     TraceTracer tracer, boolean pomRewriteAvailable, JdkRemovalScanner removalScanner,
+                     boolean dependencyUpgradeAvailable, boolean parentUpgradeAvailable) {
         this.taskStore = taskStore;
         this.planner = planner;
         this.llmProperties = llmProperties;
@@ -122,6 +136,8 @@ public class PlanNode implements NodeExecutor {
         this.tracer = tracer;
         this.pomRewriteAvailable = pomRewriteAvailable;
         this.removalScanner = removalScanner;
+        this.dependencyUpgradeAvailable = dependencyUpgradeAvailable;
+        this.parentUpgradeAvailable = parentUpgradeAvailable;
     }
 
     @Override
@@ -186,10 +202,33 @@ public class PlanNode implements NodeExecutor {
         // 这些文件不修整个工程就编不过，必须由规则强制补进清单，而不是听任模型判断。
         // 入口文件若命中移除风险但模型没选，也会在这里被补回来。
         List<String> merged = mergeRiskFiles(targets, removalRisks);
+
+        // 安全网第二层：javax→jakarta 迁移文件（javax.validation / javax.servlet / javax.persistence 等）。
+        // 它们不是「JDK 已移除包」，JdkRemovalScanner 扫不到，只落在 JakartaArtifactCatalog 里；
+        // 但漏改同样让整仓编译失败（实测博客工程：模型只挑了 33 个文件，9 个 javax.validation 文件漏网
+        // → 整仓 VERIFY 编译失败）。这里用统一的 LegacyImportDetector 再兜一遍，
+        // 保证「该改哪些文件」与「改写后算不算改完」是同一把尺子。
+        List<String> legacyFiles = scanLegacyImportFiles(context.workspace());
+        for (String file : legacyFiles) {
+            if (!merged.contains(file)) {
+                merged.add(file);
+            }
+        }
+
+        // 安全网第三层：命中「Spring Boot 2→3 破坏性 API」的文件。
+        // 前两层都只量命名空间，于是一个 javax import 都没有、却用了 Spring 6 已换底层实现的 API 的
+        // 文件会完全隐身 —— 实测博客工程 RestTemplateConfig.java 就是这样：用了
+        // HttpComponentsClientHttpRequestFactory，Spring 6 起它只接受 HttpClient 5，
+        // 文件从头到尾没被任何一层选中，最后整仓 VERIFY 卡死在它一个文件上。
+        // 注意这里只做「选文件」：命中的文件不一定都要改，具体怎么改由改写节点的提示告知模型。
+        Map<String, List<Spring3BreakingApiScanner.Finding>> breakingHits =
+                Spring3BreakingApiScanner.scanProject(context.workspace());
+        merged = mergeBreakingApiFiles(merged, breakingHits);
+
         if (merged.size() != targets.size()) {
             List<String> added = new ArrayList<>(merged);
             added.removeAll(targets);
-            log.warn("安全网强制补入 {} 个模型漏掉的移除风险文件: {}", added.size(), added);
+            log.warn("安全网强制补入 {} 个模型漏掉的待迁移文件: {}", added.size(), added);
             targets = merged;
         }
 
@@ -209,22 +248,62 @@ public class PlanNode implements NodeExecutor {
                     + "后续改写若使用 Java 17+ 语法将编译失败", pomReason);
         }
 
-        // 门禁开启时，每个文件的链条铺成 REWRITE → GATE → VERIFY：
-        // 改完先停下等人看一眼补丁，批准后才进沙箱验证。
-        // GATE 节点与 REWRITE/VERIFY 一样在**运行期**插入，随后由调度循环发现并执行。
+        // 工程声明了「大版本 < 3 的 spring-boot-starter-parent」时，在 POM_REWRITE 之后插一个 PARENT_UPGRADE，
+        // 把 BOM 升到 jakarta 命名空间（Spring Boot 2.7 → 3.x）。它是第④层（注入 jakarta 依赖）能成立的前提——
+        // 不先升 parent，注入的 jakarta.* 依赖只会跟旧 SB2 的 javax 栈冲突。仅当执行器可用时才插。
+        long parentChainBase = chainBase;
+        boolean parentNeeded = projectNeedsParentUpgrade(context.workspace());
+        if (parentNeeded && parentUpgradeAvailable) {
+            parentChainBase = taskStore.insertNode(context.task().id(), ParentUpgradeNode.NODE_KEY,
+                    NodeType.PARENT_UPGRADE, List.of(chainBase), 0);
+            log.info("已插入 Spring Boot parent 升级节点（工程用到需升级的 spring-boot-starter-parent），"
+                    + " {} 个文件链改挂它之后", targets.size());
+        } else if (parentNeeded) {
+            log.warn("工程需升级 spring-boot-starter-parent 到 3.x，但容器里没有 PARENT_UPGRADE 执行器，已跳过 —— "
+                    + "后续 jakarta 依赖注入与源码改写将因命名空间不匹配而编译失败");
+        }
+
+        // 工程用到了「从 JDK 移除、需 jakarta 依赖」的包，或含有需坐标/版本规范化的旧依赖时，
+        // 在 PARENT_UPGRADE 之后插一个 DEPENDENCY_UPGRADE，让改写后的 jakarta.* import 在 VERIFY 里能编过、
+        // 旧坐标（如 mysql-connector-java）也换成 SB3 形态。它必须在 REWRITE 之前执行（依赖顺序见下）。
+        // 只有确实会需要、且执行器可用时才插：否则既空跑又白占一条 DAG。
+        long dependencyChainBase = parentChainBase;
+        boolean jakartaNeeded = JakartaArtifactCatalog.anyArtifactNeeded(removalRisks);
+        boolean coordNeeded = pomNeedsDependencyUpgrade(context.workspace());
+        // 第三类缺口：框架破坏性 API 换掉的底层库（如 Spring 6 的
+        // HttpComponentsClientHttpRequestFactory 需要 httpclient5）。源码改得再对，classpath 里没这个
+        // 库也编不过 —— 所以它和 jakarta 注入一样属于「依赖侧必须补」的部分。
+        boolean sb3Needed = SpringBoot3DependencyCatalog.anyNeeded(breakingHits);
+        if ((jakartaNeeded || coordNeeded || sb3Needed) && dependencyUpgradeAvailable) {
+            dependencyChainBase = taskStore.insertNode(context.task().id(), DependencyUpgradeNode.NODE_KEY,
+                    NodeType.DEPENDENCY_UPGRADE, List.of(parentChainBase), 0);
+            log.info("已插入依赖升级节点（jakarta 依赖={}，坐标/版本规范化={}，SB3 破坏性 API 依赖={}），"
+                    + " {} 个文件链改挂它之后", jakartaNeeded, coordNeeded, sb3Needed, targets.size());
+        } else if (jakartaNeeded || coordNeeded || sb3Needed) {
+            log.warn("工程需升级依赖才能编译（jakarta 依赖={}，坐标/版本规范化={}，SB3 破坏性 API 依赖={}），"
+                    + "但容器里没有 DEPENDENCY_UPGRADE 执行器，已跳过", jakartaNeeded, coordNeeded, sb3Needed);
+        }
+
+        // 批语义：先铺出所有文件的 REWRITE（彼此独立、互不依赖），再铺「一条」整仓 VERIFY，
+        // 它依赖全部 REWRITE（门禁开启时依赖全部 GATE）。这样 VERIFY 跑的是整仓 mvn test，
+        // 但只在「所有文件都改完」之后才跑一次 —— 避免「改了 f1、f2 还 javax，于是整仓编译失败、
+        // 反复重跑 f1」的不收敛死循环（详见 DagScheduler.planRetry 的批语义说明）。
+        // 门禁开启时，每个文件仍铺一道「改写后人工门禁」，但整仓 VERIFY 统一接在所有门禁之后。
         boolean gate = coreProperties != null && coreProperties.requireRewriteApproval();
+        List<Long> verifyDeps = new ArrayList<>();
         for (String filePath : targets) {
             long rewriteId = taskStore.insertNode(context.task().id(),
-                    RewriteNode.nodeKey(filePath), NodeType.REWRITE, List.of(chainBase), 0);
-            long verifyDependency = rewriteId;
+                    RewriteNode.nodeKey(filePath), NodeType.REWRITE, List.of(dependencyChainBase), 0);
             if (gate) {
-                verifyDependency = taskStore.insertNode(context.task().id(),
-                        GateNode.nodeKey(filePath), NodeType.GATE, List.of(rewriteId), 0);
+                verifyDeps.add(taskStore.insertNode(context.task().id(),
+                        GateNode.nodeKey(filePath), NodeType.GATE, List.of(rewriteId), 0));
+            } else {
+                verifyDeps.add(rewriteId);
             }
-            taskStore.insertNode(context.task().id(),
-                    VerifyNode.nodeKey(filePath), NodeType.VERIFY, List.of(verifyDependency), 0);
         }
-        log.info("规划完成: {} 个文件待迁移 → {}（门禁 {}）",
+        taskStore.insertNode(context.task().id(),
+                VerifyNode.NODE_KEY, NodeType.VERIFY, verifyDeps, 0);
+        log.info("规划完成（批语义）: {} 个文件待迁移 → {}（门禁 {}，单条整仓 VERIFY 依赖全部改写）",
                 targets.size(), targets, gate ? "开启" : "关闭");
 
         return NodeOutcome.ok(effectivePlan(outcome.plan(), targets));
@@ -272,6 +351,75 @@ public class PlanNode implements NodeExecutor {
     }
 
     /**
+     * 扫描工作目录，找出所有仍含「需要迁移的旧 import」的 java 文件（相对路径）。
+     *
+     * <p>判定口径与 {@link LegacyImportDetector} 完全一致（JDK 已移除包 + javax→jakarta 白名单，
+     * 且排除 javax.crypto / javax.sql 这类 JDK 内建包）。用同一把尺子是关键：
+     * 否则会出现「文件漏改但没进清单、改写后校验又管不到它」的真空区——
+     * 规划认为不用改、改写校验认为改完了，最后一起在整仓编译时才炸出来。
+     */
+    private static List<String> scanLegacyImportFiles(Path workspace) {
+        List<String> hits = new ArrayList<>();
+        try {
+            // 这里刻意不复用 MAX_PLAN_FILES —— 那个上限是给规划模型的 prompt 省上下文用的（默认 60 个），
+            // 但真实工程常有上百个文件（实测博客工程 125 个），按它截断会让第 61 个之后的文件永远进不了清单。
+            // 确定性扫描必须看全量，否则安全网自己就成了漏网之源。
+            for (Path file : SourceFiles.listJavaFiles(workspace, Integer.MAX_VALUE)) {
+                String source;
+                try {
+                    source = Files.readString(file, StandardCharsets.UTF_8);
+                } catch (IOException e) {
+                    continue;
+                }
+                if (LegacyImportDetector.hasLeftover(source)) {
+                    hits.add(SourceFiles.relativePath(workspace, file));
+                }
+            }
+        } catch (IOException e) {
+            log.warn("扫描遗留 import 文件失败: {}", e.getMessage());
+        }
+        return hits;
+    }
+
+    /**
+     * 工程是否整体需要升级 Spring Boot parent（任意一份 pom 声明了 spring-boot-starter-parent 且大版本 < 3）。
+     *
+     * <p>只扫 pom 的 parent 声明，不读源码——这是阶段 5 第②层的前置判定，决定了要不要插 PARENT_UPGRADE 节点。
+     */
+    private static boolean projectNeedsParentUpgrade(Path workspace) {
+        try {
+            for (Path pom : SourceFiles.listPomFiles(workspace)) {
+                String xml = Files.readString(pom, StandardCharsets.UTF_8);
+                if (SpringBootParentUpgrader.needsUpgrade(xml)) {
+                    return true;
+                }
+            }
+        } catch (IOException e) {
+            log.warn("扫描 pom 判断是否需要升级 spring-boot-starter-parent 失败: {}", e.getMessage());
+        }
+        return false;
+    }
+
+    /**
+     * 工程是否含有需坐标/版本规范化的旧依赖（如 {@code mysql:mysql-connector-java}、
+     * {@code mybatis-spring-boot-starter} 2.3.x）。这是阶段 5 第③/④层的前置判定，
+     * 决定了要不要插 DEPENDENCY_UPGRADE 节点（即使工程没用到任何需 jakarta 依赖的 API）。
+     */
+    private static boolean pomNeedsDependencyUpgrade(Path workspace) {
+        try {
+            for (Path pom : SourceFiles.listPomFiles(workspace)) {
+                String xml = Files.readString(pom, StandardCharsets.UTF_8);
+                if (PomDependencyUpgrader.anyUpgradeNeeded(xml)) {
+                    return true;
+                }
+            }
+        } catch (IOException e) {
+            log.warn("扫描 pom 判断是否需要依赖坐标/版本升级失败: {}", e.getMessage());
+        }
+        return false;
+    }
+
+    /**
      * 把「含 JDK 已移除 import」的风险文件强制并入迁移清单。
      *
      * <p>模型按符号/文件名判断「要不要改」，天然会漏掉那些<b>只有 import 一行旧 API、正文早已现代化</b>的文件
@@ -290,6 +438,28 @@ public class PlanNode implements NodeExecutor {
             boolean already = merged.stream().anyMatch(p -> p.replace('\\', '/').equalsIgnoreCase(riskFile));
             if (!already) {
                 merged.add(riskFile);
+            }
+        }
+        return merged;
+    }
+
+    /**
+     * 安全网第三层：把命中「Spring Boot 2→3 破坏性 API」的文件强制补进清单。
+     *
+     * <p>与 {@link #mergeRiskFiles} 同构、但补的是另一类漏网：那些文件<b>一个 javax import 都没有</b>，
+     * 命名空间那两把尺子都看不见它们，却因为 Spring 6 换掉了底层实现 / 删掉了适配器而必须改。
+     * 实测博客工程 {@code RestTemplateConfig.java} 就是这样整仓编译卡死的。</p>
+     *
+     * <p>抽成静态方法而不内联，是为了能像 {@link #mergeRiskFiles} 一样被确定性地单测 ——
+     * 「哪些文件必须进清单」是这个项目最该被钉死、也最难靠端到端验证的一段逻辑。</p>
+     */
+    static List<String> mergeBreakingApiFiles(List<String> proposed,
+                                              Map<String, List<Spring3BreakingApiScanner.Finding>> byFile) {
+        List<String> merged = new ArrayList<>(proposed);
+        for (String file : byFile.keySet()) {
+            boolean already = merged.stream().anyMatch(p -> p.replace('\\', '/').equalsIgnoreCase(file));
+            if (!already) {
+                merged.add(file);
             }
         }
         return merged;

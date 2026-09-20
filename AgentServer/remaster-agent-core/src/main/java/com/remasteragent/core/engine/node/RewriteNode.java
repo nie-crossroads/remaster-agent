@@ -22,6 +22,8 @@ import com.remasteragent.llm.rewrite.CodeRewriter;
 import com.remasteragent.llm.rewrite.RewriteCommand;
 import com.remasteragent.llm.rewrite.RewriteOutcome;
 import com.remasteragent.tools.ast.JavaSourceAnalyzer;
+import com.remasteragent.tools.ast.LegacyImportDetector;
+import com.remasteragent.tools.ast.Spring3BreakingApiScanner;
 import com.remasteragent.tools.diff.UnifiedDiffGenerator;
 import io.opentelemetry.api.trace.Span;
 import org.slf4j.Logger;
@@ -172,6 +174,13 @@ public class RewriteNode implements NodeExecutor {
             return NodeOutcome.fail("读取或解析目标源码失败: " + e.getMessage());
         }
 
+        // 框架破坏性变更（Spring Boot 2→3）由确定性扫描给出，与「上一次失败反馈」性质不同：
+        // 它是首轮就有的静态事实，模型看到才知道「这个文件虽然没 javax，但底层 API 已经换了」。
+        // 提示取自改写前的 source —— 与残留旧 import 校验同一时刻的真相。
+        List<String> migrationHints = Spring3BreakingApiScanner.scan(source).stream()
+                .map(finding -> finding.ruleId() + ": " + finding.hint())
+                .toList();
+
         RewriteCommand command = new RewriteCommand(
                 targetFile,
                 header.packageName(),
@@ -182,7 +191,8 @@ public class RewriteNode implements NodeExecutor {
                 context.retryFeedback(),
                 retrieveContext(context.task().projectRoot(), targetFile, header),
                 new RetryProgressListener(progressPublisher, context.task().id(),
-                        context.node().id(), context.node().nodeKey(), context.attempt(), "改写"));
+                        context.node().id(), context.node().nodeKey(), context.attempt(), "改写"),
+                migrationHints);
 
         if (context.isRetry()) {
             log.info("第 {} 次重写 attempt={} 文件={} 携带失败反馈 {} 字",
@@ -221,6 +231,22 @@ public class RewriteNode implements NodeExecutor {
             return NodeOutcome.fail("产出未通过校验：" + guardrail.reason());
         }
 
+        // 迁移完整度校验：改写产物若仍残留「本应被迁移走的旧 import」（JDK 移除包，或 javax → jakarta
+        // 白名单项），直接判失败并带<b>精确</b>反馈重跑，而不是等到整仓 VERIFY 编译失败才暴露真因。
+        // 这是兜住「模型漏改某个 import」这道最隐蔽的迁移质量问题的确定性安全网
+        // —— 博客工程（BlogService）里 {@code javax.annotation.Resource} 就曾被漏改，导致整仓编译失败。
+        // 判定口径与调度器一致（{@link LegacyImportDetector}），JDK 内建仍在的 javax.*（如 javax.crypto）
+        // 不会被误伤，不会误判阻断改写。
+        List<String> leftover = LegacyImportDetector.leftoverLegacyImports(proposal.newContent());
+        if (!leftover.isEmpty()) {
+            String joined = String.join(", ", leftover);
+            log.warn("改写后仍残留需迁移的旧 import [{}]: {}", targetFile, joined);
+            return NodeOutcome.fail("改写后仍残留需迁移的旧 import（未从 javax 迁到 jakarta）："
+                    + joined + "。请将这些 import 改为对应的 jakarta.* 命名空间"
+                    + "（例如 javax.annotation.Resource → jakarta.annotation.Resource、"
+                    + "javax.persistence.* → jakarta.persistence.*），不要漏改。");
+        }
+
         try {
             String diff = UnifiedDiffGenerator.generate(source, proposal.newContent(), targetFile);
             UnifiedDiffGenerator.DiffStat stat = UnifiedDiffGenerator.stat(diff);
@@ -232,6 +258,19 @@ public class RewriteNode implements NodeExecutor {
             // 这里判 FAIL 会走 DagScheduler.planRetry → attempt+1，
             // 且失败原因由 resolveRetryFeedback 带回给模型，让它知道「上次那版等于没交」。
             if (stat.added() + stat.removed() == 0) {
+                // 「模型原样返回」不一定是坏事 —— 得先问源文件到底有没有活要干。
+                // 源文件已无残留旧 import、也未命中框架破坏性变更时，模型判断「无需改动」就是正确结论；
+                // 此时若照旧判 FAIL，只会把已经干净的文件再拉回来跑一轮（实测 #57 里因此空跑 20 次，
+                // 白白烧掉一轮 LLM 调用与一次沙箱构建），而 VERIFY 侧什么信息也拿不到。
+                // 反过来，源文件确实有活要干却原样返回，才是真失败，必须带反馈重跑。
+                boolean nothingToDo = !LegacyImportDetector.hasLeftover(source)
+                        && !Spring3BreakingApiScanner.hasAny(source);
+                if (nothingToDo) {
+                    log.info("改写未产生差异，但源文件已无待迁移项，判定为无需改动: {}", targetFile);
+                    return NodeOutcome.ok(new RewriteResult(
+                            targetFile, source, "", "源文件已无待迁移项，无需改写",
+                            outcome.model(), context.attempt()));
+                }
                 log.warn("改写未产生任何差异 [{}]，模型返回的内容与原文一致", targetFile);
                 return NodeOutcome.fail("改写未产生任何差异（+0/-0）：返回的内容与原文完全相同。"
                         + "请重新审视迁移目标，至少完成一项实质改写（如 javax→jakarta、"

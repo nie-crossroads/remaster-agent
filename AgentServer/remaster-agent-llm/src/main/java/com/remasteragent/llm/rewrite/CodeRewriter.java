@@ -202,6 +202,18 @@ public class CodeRewriter {
             sb.append("\n--- 失败信息结束 ---\n");
         }
 
+        // 框架破坏性变更提示来自确定性扫描，不是模型的猜测：它说的是「这个 Spring Boot 2→3 的
+        // API 换掉了/删掉了，必须这样改」。没有这一节时，模型面对一个「javax 已全改完、但底层
+        // 依赖已被 Spring 6 换掉」的文件，会认为它无需改写而原样返回 —— 于是整仓编译卡在这里，
+        // 且失败原因完全不指向真因。
+        if (command.hasHints()) {
+            sb.append("\n--- 本文件命中了以下框架破坏性变更（Spring Boot 2 → 3），必须处理 ---\n");
+            for (String hint : command.migrationHints()) {
+                sb.append("- ").append(hint).append('\n');
+            }
+            sb.append("--- 破坏性变更清单结束 ---\n");
+        }
+
         appendRelatedCode(sb, command);
 
         sb.append("\nSource code to modernize:\n```java\n");

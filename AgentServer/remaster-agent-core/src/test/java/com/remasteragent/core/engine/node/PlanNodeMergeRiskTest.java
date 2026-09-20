@@ -1,12 +1,15 @@
 package com.remasteragent.core.engine.node;
 
 import com.remasteragent.tools.ast.JdkRemovalScanner;
+import com.remasteragent.tools.ast.Spring3BreakingApiScanner;
+import com.remasteragent.tools.pom.SpringBoot3DependencyCatalog;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -60,5 +63,41 @@ class PlanNodeMergeRiskTest {
         List<String> merged = PlanNode.mergeRiskFiles(proposed, risks);
         assertEquals(2, merged.size());
         assertTrue(merged.contains("src/main/java/com/blog/service/ArticleService.java"));
+    }
+
+    @Test
+    void modelMissesSpring3BreakingApiFile_getsForceAdded() {
+        // 模型挑了已现代化的工具类，漏掉了零 javax、但用了 Spring 6 换掉底层实现的 API 的配置类
+        List<String> proposed = List.of("src/main/java/com/blog/common/util/DateUtil.java");
+        Map<String, List<Spring3BreakingApiScanner.Finding>> byFile = Map.of(
+                "src/main/java/com/blog/system/config/RestTemplateConfig.java",
+                List.of(new Spring3BreakingApiScanner.Finding("SPRING6_HTTPCOMPONENTS_FACTORY",
+                        "HttpComponentsClientHttpRequestFactory", "改用 HttpClient 5")));
+
+        List<String> merged = PlanNode.mergeBreakingApiFiles(proposed, byFile);
+
+        assertEquals(2, merged.size());
+        assertTrue(merged.contains("src/main/java/com/blog/system/config/RestTemplateConfig.java"),
+                "一个 javax 都没有、却会被 Spring 6 卡住编译的文件必须被强制补进清单: " + merged);
+    }
+
+    @Test
+    void spring3BreakingApiHit_requiresDependencyInjection() {
+        Map<String, List<Spring3BreakingApiScanner.Finding>> byFile = Map.of(
+                "src/main/java/com/blog/system/config/RestTemplateConfig.java",
+                List.of(new Spring3BreakingApiScanner.Finding("SPRING6_HTTPCOMPONENTS_FACTORY",
+                        "HttpComponentsClientHttpRequestFactory", "改用 HttpClient 5")));
+
+        assertTrue(SpringBoot3DependencyCatalog.anyNeeded(byFile),
+                "底层库被换掉属于依赖缺口，改源码解决不了，必须触发 DEPENDENCY_UPGRADE 注入 httpclient5");
+    }
+
+    @Test
+    void cleanProject_isNotDraggedIntoPlanOrDependencyInjection() {
+        Map<String, List<Spring3BreakingApiScanner.Finding>> empty = Map.of();
+
+        assertEquals(1, PlanNode.mergeBreakingApiFiles(List.of("a.java"), empty).size());
+        assertFalse(SpringBoot3DependencyCatalog.anyNeeded(empty),
+                "没有命中时既不该补文件，也不该插依赖升级节点");
     }
 }

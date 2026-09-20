@@ -65,12 +65,53 @@ class RewriteNodeTest {
             }
             """;
 
+    /**
+     * 「没有 javax、但用了 Spring 6 已换底层实现的 API」的源码 —— 博客工程
+     * {@code RestTemplateConfig.java} 的同类：一个 javax 都没有，因此命名空间那把尺子完全看不见它。
+     */
+    private static final String USES_SPRING5_API_SOURCE = """
+            package com.example;
+
+            import org.apache.http.impl.client.CloseableHttpClient;
+            import org.apache.http.impl.client.HttpClients;
+            import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
+            import org.springframework.web.client.RestTemplate;
+
+            public class Demo {
+                public String stamp() {
+                    return new java.util.Date().toString();
+                }
+
+                public RestTemplate restTemplate() {
+                    CloseableHttpClient client = HttpClients.createDefault();
+                    return new RestTemplate(new HttpComponentsClientHttpRequestFactory(client));
+                }
+            }
+            """;
+
     private static final String MODERN_SOURCE = """
             package com.example;
 
             import java.time.Instant;
 
             public class Demo {
+                public String stamp() {
+                    return Instant.now().toString();
+                }
+            }
+            """;
+
+    /** 模型把业务逻辑改了，却漏了 import：仍残留 javax.annotation.Resource（未迁到 jakarta）。 */
+    private static final String LEAVES_JAVAX_SOURCE = """
+            package com.example;
+
+            import javax.annotation.Resource;
+            import java.time.Instant;
+
+            public class Demo {
+                @Resource
+                private Object dependency;
+
                 public String stamp() {
                     return Instant.now().toString();
                 }
@@ -183,8 +224,11 @@ class RewriteNodeTest {
 
     @Test
     @DisplayName("模型原样返回源文件（+0/-0）：判失败，而不是假装成功 —— 否则白烧一轮且失败原因指向不了真因")
-    void identicalContentFailsInsteadOfPretendingSuccess() {
-        CapturingRewriter rewriter = new CapturingRewriter(proposal(ENTRY, LEGACY_SOURCE), null);
+    void identicalContentFailsInsteadOfPretendingSuccess() throws IOException {
+        // 源文件命中了 Spring Boot 2→3 的破坏性 API（HttpComponentsClientHttpRequestFactory），
+        // 属于「确实有活要干」的文件 —— 此时原样返回就是没交作业，必须判失败。
+        Files.writeString(workspace.resolve(ENTRY), USES_SPRING5_API_SOURCE, StandardCharsets.UTF_8);
+        CapturingRewriter rewriter = new CapturingRewriter(proposal(ENTRY, USES_SPRING5_API_SOURCE), null);
 
         NodeOutcome outcome = execute(rewriter, 0, null);
 
@@ -194,12 +238,69 @@ class RewriteNodeTest {
                 "失败原因要说清是「没有产生差异」: " + outcome.error());
 
         // 不写盘、不留空补丁 —— 否则审计里会多出一条没有内容的记录，前端还会给它一个「第 N 轮」标签
-        assertEquals(LEGACY_SOURCE, read(workspace.resolve(ENTRY)));
+        assertEquals(USES_SPRING5_API_SOURCE, read(workspace.resolve(ENTRY)));
         assertEquals(0, store.findPatches(taskId).size(), "空补丁不该入库");
 
         // 与护栏同理：调用确实发生了，成本不能因为「没改出东西」就抹掉
         assertEquals(1, store.findLlmCalls(taskId).size(),
                 "钱花在了一次没有产出的调用上，报表必须如实反映");
+    }
+
+    @Test
+    @DisplayName("源文件已无待迁移项、模型原样返回：判「无需改动」成功 —— 而不是把已干净的文件再拉回来空跑一轮")
+    void identicalContentOnAlreadyCleanFileIsNoop() {
+        // LEGACY_SOURCE 既无残留旧 import、也没命中任何框架破坏性 API，
+        // 模型判定「无需改动」就是正确结论 —— #57 里就因为一律判失败而空跑了 20 次。
+        CapturingRewriter rewriter = new CapturingRewriter(proposal(ENTRY, LEGACY_SOURCE), null);
+
+        NodeOutcome outcome = execute(rewriter, 0, null);
+
+        assertTrue(outcome.success(),
+                "源文件已无待迁移项时，原样返回应判无需改动成功: " + outcome.error());
+        assertEquals(LEGACY_SOURCE, read(workspace.resolve(ENTRY)), "没有改动就不该写盘");
+        assertEquals(0, store.findPatches(taskId).size(), "没有改动就不该落 patch");
+        assertEquals(1, store.findLlmCalls(taskId).size(),
+                "这次调用确实发生了，成本不能因为「判定无需改动」就抹掉");
+    }
+
+    @Test
+    @DisplayName("命中框架破坏性 API 的文件：把「该怎么改」的确定性提示递给模型，首轮就带上")
+    void spring3BreakingApiHintsArePassedToModel() throws IOException {
+        Files.writeString(workspace.resolve(ENTRY), USES_SPRING5_API_SOURCE, StandardCharsets.UTF_8);
+        CapturingRewriter rewriter = new CapturingRewriter(proposal(ENTRY, MODERN_SOURCE), null);
+
+        execute(rewriter, 0, null);
+
+        assertNotNull(rewriter.lastCommand, "改写请求应被桩件捕获");
+        assertTrue(rewriter.lastCommand.migrationHints().stream()
+                        .anyMatch(hint -> hint.contains("HttpClient 5")),
+                "命中 HttpComponentsClientHttpRequestFactory 就必须告诉模型要换 HttpClient 5，"
+                        + "否则模型看着一个 javax 已全改完的文件，只会认为它无需改动: "
+                        + rewriter.lastCommand.migrationHints());
+    }
+
+    @Test
+    @DisplayName("改写后仍残留旧 import（漏改 javax → jakarta）：判失败并带精确反馈，而非假装成功")
+    void leftoverLegacyImportFailsWithFeedback() {
+        // 模型改了业务逻辑，却漏了 javax.annotation.Resource —— 复现博客工程曾被漏改的真实失误
+        CapturingRewriter rewriter = new CapturingRewriter(proposal(ENTRY, LEAVES_JAVAX_SOURCE), null);
+
+        NodeOutcome outcome = execute(rewriter, 0, null);
+
+        assertFalse(outcome.success(),
+                "漏改的 import 必须判失败：交给整仓 VERIFY 兜底只会拿到不指向真因的编译错误");
+        assertTrue(outcome.error().contains("javax.annotation.Resource"),
+                "失败原因应精确指出漏改了哪些 import: " + outcome.error());
+        assertTrue(outcome.error().contains("jakarta.annotation.Resource"),
+                "应给出 jakarta 目标命名空间提示: " + outcome.error());
+
+        // 不写盘、不留空补丁 —— 否则审计里会多出一条没有内容的记录，前端还会给它一个「第 N 轮」标签
+        assertEquals(LEGACY_SOURCE, read(workspace.resolve(ENTRY)));
+        assertEquals(0, store.findPatches(taskId).size(), "残留旧 import 的改写不该入库");
+
+        // 关键：调用确实发生了、token 已经消耗，成本必须如实入账，否则报表会漏账
+        assertEquals(1, store.findLlmCalls(taskId).size(),
+                "被判定漏改的产出同样是花了钱的，成本不能漏记");
     }
 
     @Test

@@ -291,12 +291,15 @@ public final class InMemoryTaskStore implements TaskStore {
 
     @Override
     public int countVerifyRounds(long taskId) {
-        // 与 JdbcTaskStore 同一口径：轮次 = 最大 attempt + 1，不是节点总数
-        return findNodes(taskId).stream()
-                .filter(node -> node.nodeType() == NodeType.VERIFY)
-                .mapToInt(DagNode::attempt)
-                .max()
-                .orElse(-1) + 1;
+        // 与 JdbcTaskStore 同一口径：轮次 = 真正执行过的 VERIFY 轮数（去重后的 distinct attempt），
+        // 不是节点总数，也不是「最大 attempt + 1」。被回退重铺、最终 SKIPPED 的 VERIFY 节点不计入，
+        // 否则 reissueBatchVerify 因 REWRITE 失败而自增的节点 attempt 会把轮次胀穿。
+        return (int) findNodes(taskId).stream()
+                .filter(node -> node.nodeType() == NodeType.VERIFY
+                        && node.status() != NodeStatus.SKIPPED)
+                .map(DagNode::attempt)
+                .distinct()
+                .count();
     }
 
     @Override

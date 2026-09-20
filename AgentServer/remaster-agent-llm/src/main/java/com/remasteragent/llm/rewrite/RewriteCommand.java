@@ -27,6 +27,11 @@ import java.util.List;
  *                        <b>由调用方（节点）而不是改写器来提供</b>：只有节点知道这次执行属于哪个
  *                        任务的哪个节点，也只有它手上有进度发布口。改写器只负责「如实上报」，
  *                        不关心上报到哪 —— 于是它仍然可以在没有 Redis、没有数据库的单测里跑。
+ * @param migrationHints 由<b>确定性扫描</b>给出的「这个文件必须处理哪些框架破坏性变更」（Spring Boot 2→3）。
+ *                        与 {@code failureFeedback} 的区别：后者来自上一次失败，前者来自静态规则、
+ *                        首轮就有 —— 正是它让「一个 javax 都没有、但用了 Spring 6 已换底层实现的 API」
+ *                        这类文件也能被正确改写（如 {@code HttpComponentsClientHttpRequestFactory}）。
+ *                        null 会被规整成空列表。
  */
 public record RewriteCommand(
         String filePath,
@@ -37,12 +42,22 @@ public record RewriteCommand(
         int attempt,
         String failureFeedback,
         List<RetrievedChunk> contextChunks,
-        LlmAttemptListener attemptListener
+        LlmAttemptListener attemptListener,
+        List<String> migrationHints
 ) {
 
     public RewriteCommand {
         contextChunks = contextChunks == null ? List.of() : List.copyOf(contextChunks);
         attemptListener = attemptListener == null ? LlmAttemptListener.NONE : attemptListener;
+        migrationHints = migrationHints == null ? List.of() : List.copyOf(migrationHints);
+    }
+
+    /** 兼容「不带迁移提示」的构造：阶段 1 的调用方与单测都走这个入口。 */
+    public RewriteCommand(String filePath, String packageName, String className,
+                          String sourceContent, int targetJdk, int attempt, String failureFeedback,
+                          List<RetrievedChunk> contextChunks, LlmAttemptListener attemptListener) {
+        this(filePath, packageName, className, sourceContent, targetJdk, attempt, failureFeedback,
+                contextChunks, attemptListener, List.of());
     }
 
     /** 兼容「不带重试回调」的构造：重试与进度上报交由上层负责。 */
@@ -50,7 +65,7 @@ public record RewriteCommand(
                           String sourceContent, int targetJdk, int attempt, String failureFeedback,
                           List<RetrievedChunk> contextChunks) {
         this(filePath, packageName, className, sourceContent, targetJdk, attempt, failureFeedback,
-                contextChunks, null);
+                contextChunks, null, List.of());
     }
 
     /** 兼容「不带检索上下文」的构造：阶段 1 的调用方与单测都走这个入口。 */
@@ -67,5 +82,10 @@ public record RewriteCommand(
     /** 是否带上了跨文件上下文 —— 决定 prompt 里要不要出现「相关代码」那一节。 */
     public boolean hasContext() {
         return !contextChunks.isEmpty();
+    }
+
+    /** 是否带上了框架破坏性变更提示 —— 决定 prompt 里要不要出现「必须处理」那一节。 */
+    public boolean hasHints() {
+        return !migrationHints.isEmpty();
     }
 }

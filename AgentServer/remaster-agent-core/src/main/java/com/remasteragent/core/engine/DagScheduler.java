@@ -1,6 +1,8 @@
 package com.remasteragent.core.engine;
 
 import com.remasteragent.common.agent.PomRewriteResult;
+import com.remasteragent.common.agent.DependencyUpgradeResult;
+import com.remasteragent.common.agent.ParentUpgradeResult;
 import com.remasteragent.common.agent.RewriteResult;
 import com.remasteragent.common.agent.VerifyResult;
 import com.remasteragent.common.domain.DagNode;
@@ -23,6 +25,7 @@ import com.remasteragent.core.progress.ProgressEvent;
 import com.remasteragent.core.progress.ProgressPublisher;
 import com.remasteragent.core.store.TaskStore;
 import com.remasteragent.core.trace.TraceTracer;
+import com.remasteragent.tools.ast.LegacyImportDetector;
 import com.remasteragent.tools.sandbox.WorkspacePreparer;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Scope;
@@ -40,8 +43,10 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -470,7 +475,7 @@ public class DagScheduler {
         publish(ProgressEvent.nodeStatus(task.id(), node.id(), node.nodeKey(),
                 NodeStatus.FAILED.name(), node.attempt(), trim(outcome.error(), 200)));
 
-        planRetry(task, node, outcome);
+        planRetry(task, node, outcome, workspace);
         TraceTracer.endError(span, outcome.error());
         return false;
     }
@@ -499,20 +504,28 @@ public class DagScheduler {
     }
 
     /**
-     * 失败后的回退决策 —— 整个闭环里最需要讲清楚的一段逻辑。
+     * 失败后的回退决策 —— 整个闭环里最需要讲清楚的一段逻辑，也是阶段 5 多文件迁移的命门。
      *
-     * <p>规则：
+     * <h2>批语义（阶段 5 多文件迁移的核心修正）</h2>
+     * <p>旧拓扑是「每文件 rewrite → verify」各铺一条链，但 VERIFY 跑的是整仓 {@code mvn test}。
+     * 一旦 f2 还 javax、f1 已改完，VERIFY(f1) 会因整仓编不过而失败，于是反复重跑 f1 ——
+     * 永远修不到 f2，形成不收敛死循环，且白白烧掉整轮 VERIFY 配额。这正是博客工程端到端卡死的根因。
+     * 修正后的拓扑（见 {@link PlanNode}）：先铺所有 REWRITE，再铺<b>一条</b>依赖全部 REWRITE 的整仓 VERIFY。
+     * 回退也随之改成「批」的：</p>
      * <ul>
-     *   <li>ANALYZE 失败不重试。源码都解析不了说明任务前提不成立，重试只是浪费钱。</li>
-     *   <li>REWRITE / VERIFY 失败 → 派生下一轮（attempt+1）的 REWRITE + VERIFY。</li>
+     *   <li>REWRITE 失败 → 只重跑这一文件的下一轮 REWRITE（批语义：不牵连其它已成功的文件），
+     *       并 {@link #reissueBatchVerify(long)} 重铺整仓 VERIFY 依赖最新改写。</li>
+     *   <li>VERIFY 失败 → 整仓没过，按「工作目录里仍含旧 javax 等需迁移 import 的文件」
+     *       <b>精准</b>重跑这些文件的下一轮 REWRITE，再重铺整仓 VERIFY。
+     *       已干净的文件不重跑，避免「模型对干净文件返回原样 → +0/-0 → 被判失败 → 死循环」。</li>
      *   <li>次数用尽 → 不再派生，任务在 {@link #finalizeTask} 里被判失败。</li>
      * </ul>
      *
-     * <p>REWRITE 失败时有一个容易漏掉的细节：它对应的 VERIFY(当前轮) 永远等不到依赖成功，
+     * <p>REWRITE 失败时有一个容易漏掉的细节：它对应的整仓 VERIFY 永远等不到这条 REWRITE 成功，
      * 会永远停在 PENDING。必须显式标记为 SKIPPED，否则 DAG 上会挂着一个永远不会执行的节点，
-     * 让人误以为任务还没跑完。
+     * 让人误以为任务还没跑完。</p>
      */
-    private void planRetry(MigrationTask task, DagNode failedNode, NodeOutcome outcome) {
+    private void planRetry(MigrationTask task, DagNode failedNode, NodeOutcome outcome, Path workspace) {
         if (properties.stopOnFirstFailure()) {
             log.warn("stopOnFirstFailure=true，不派生重试");
             return;
@@ -524,38 +537,226 @@ public class DagScheduler {
             return;
         }
 
-        int nextAttempt = failedNode.attempt() + 1;
-        if (nextAttempt > properties.maxRewriteAttempts()) {
-            log.warn("重写尝试已用尽（上限 {} 次），任务将判定为失败", properties.maxRewriteAttempts());
-            return;
-        }
-
-        // 回退必须落在「同一个文件」上：多文件场景下，不能因为 f1 失败而去重写 f2
+        long taskId = task.id();
         String filePath = keySuffix(failedNode.nodeKey());
 
         if (failedNode.nodeType() == NodeType.REWRITE) {
-            // 本轮的下游全部作废：门禁（若开了）与 VERIFY 都永远等不到这次 REWRITE 成功，
-            // 不显式跳过就会在 DAG 上留下两个永远 PENDING 的悬挂节点
-            skipIfPending(task.id(), gateKey(filePath), failedNode.attempt(),
-                    "上游 REWRITE 失败，本轮门禁已跳过");
-            skipIfPending(task.id(), verifyKey(filePath), failedNode.attempt(),
-                    "上游 REWRITE 失败，本轮终止");
+            retryRewrites(taskId, filePath, failedNode, outcome);
+        } else {
+            retryBatchVerify(taskId, workspace, outcome);
         }
+    }
 
-        long baseId = baseDependencyId(task.id());
-        long rewriteId = taskStore.insertNode(task.id(), rewriteKey(filePath), NodeType.REWRITE,
-                List.of(baseId), nextAttempt);
-        taskStore.insertNode(task.id(), verifyKey(filePath), NodeType.VERIFY,
-                List.of(rewriteId), nextAttempt);
-
-        // 说明：回退轮<b>不再插入门禁</b>。门禁只作用于 PLAN 规划出的首轮改写 ——
-        // 回退是模型的自动纠错，逐轮拦住人要审批会让人在「反复确认同一类小错」里疲劳；
-        // 首轮那道门已经给了人「看一眼这次迁移靠不靠谱」的机会，够了。
+    /**
+     * REWRITE 失败 → 只重跑这一文件（批语义：不牵连其它已成功的文件），并 {@link #reissueBatchVerify}
+     * 重铺整仓 VERIFY 依赖最新改写。
+     *
+     * <p>次数上限用「本文件自己的改写轮次」计（{@code maxRewriteAttempts}），与 VERIFY 重试相互独立 ——
+     * 否则 REWRITE 失败越多，下方 {@code reissueBatchVerify} 把整仓 VERIFY 的 attempt 胀得越大，
+     * 首次真的整仓 VERIFY 一失败就被 {@code maxRewriteAttempts} 截断、精准重跑「仍含旧 import 文件」
+     * 的收敛保证彻底失效（博客工程端到端就曾因此卡死）。这是修复 {@code #1} 的关键：
+     * VERIFY 的重试上限必须按「真正失败的整仓 VERIFY 轮数」计，而不是被 REWRITE 失败自增的节点 attempt。</p>
+     */
+    private void retryRewrites(long taskId, String filePath, DagNode failedNode, NodeOutcome outcome) {
+        int nextAttempt = failedNode.attempt() + 1;
+        if (nextAttempt > properties.maxRewriteAttempts()) {
+            log.warn("重写尝试已用尽（上限 {} 次），文件 {} 不再重跑，任务将靠 VERIFY 重试收敛或判失败",
+                    properties.maxRewriteAttempts(), filePath == null ? "(入口文件)" : filePath);
+            // 仍重铺整仓 VERIFY（依赖最新成功改写），让 DAG 能继续往下走而非卡在悬挂节点
+            reissueBatchVerify(taskId);
+            publish(ProgressEvent.taskStatus(taskId, TaskStatus.RUNNING.name(), "重写尝试已用尽"));
+            return;
+        }
+        // 本轮的下游全部作废：门禁（若开了）与整仓 VERIFY 都永远等不到这条 REWRITE 成功，
+        // 不显式跳过就会在 DAG 上留下永远 PENDING 的悬挂节点
+        skipIfPending(taskId, gateKey(filePath), failedNode.attempt(),
+                "上游 REWRITE 失败，本轮门禁已跳过");
+        skipIfPending(taskId, VerifyNode.NODE_KEY, failedNode.attempt(),
+                "上游 REWRITE 失败，本轮整仓 VERIFY 已跳过");
+        // 只重跑这一文件（批语义：不牵连其它已成功的文件）
+        long baseId = baseDependencyId(taskId);
+        insertRetryNode(taskId, rewriteKey(filePath), NodeType.REWRITE, List.of(baseId), nextAttempt);
         log.info("↻ 已派生第 {} 轮重写（attempt={} 文件={}），失败反馈 {} 字",
                 nextAttempt + 1, nextAttempt, filePath == null ? "(入口文件)" : filePath,
                 outcome.error() == null ? 0 : outcome.error().length());
-        publish(ProgressEvent.taskStatus(task.id(), TaskStatus.RUNNING.name(),
+        reissueBatchVerify(taskId);
+        publish(ProgressEvent.taskStatus(taskId, TaskStatus.RUNNING.name(),
                 "第 " + (nextAttempt + 1) + " 轮重写已排入队列"));
+    }
+
+    /**
+     * 整仓 VERIFY 失败 → 精准重跑「工作目录里仍含旧 import」的文件，干净文件不重跑
+     * （避免无差别重跑干净文件触发 +0/-0 死循环）。扫描为空（都干净却仍失败）则退化为重跑全部。
+     *
+     * <p>次数上限用「真正失败的整仓 VERIFY 轮数」计（{@link #countVerifyFailures}），
+     * <b>不是</b>被 {@code reissueBatchVerify} 因 REWRITE 失败而自增的节点 attempt ——
+     * 这是修复 {@code #1} 的核心，否则 REWRITE 失败越多，VERIFY 的 attempt 胀得越大，
+     * 首次真的整仓 VERIFY 一失败就被 {@code maxRewriteAttempts} 截断、精准重跑根本不会触发。</p>
+     */
+    private void retryBatchVerify(long taskId, Path workspace, NodeOutcome outcome) {
+        if (countVerifyFailures(taskId) > properties.maxRewriteAttempts()) {
+            log.warn("整仓验证重试已用尽（上限 {} 轮），任务将判定为失败", properties.maxRewriteAttempts());
+            return;
+        }
+
+        // 精准重跑「工作目录里仍含旧 import」的文件，避免无差别重跑干净文件触发 +0/-0 死循环。
+        // 扫描为空（都干净却仍失败）则退化为重跑全部。
+        List<String> toRewrite = filesStillNeedingMigration(taskId, workspace);
+        boolean scanEmpty = toRewrite.isEmpty();
+        if (scanEmpty) {
+            toRewrite = collectTargetFiles(taskId);
+            log.warn("VERIFY 失败但工作目录里没有任何文件仍含旧 import（可能失败原因不在迁移范围），"
+                    + "退化为重跑全部 {} 个文件", toRewrite.size());
+        }
+        if (toRewrite.isEmpty()) {
+            log.warn("VERIFY 失败且没有任何可重跑的文件，任务将无法收敛");
+            return;
+        }
+
+        long baseId = baseDependencyId(taskId);
+        int retried = 0;
+        for (String f : toRewrite) {
+            // 仍受「每文件 maxRewriteAttempts」约束：已耗尽改写次数的文件不再派生，
+            // 否则会去重跑一个「注定改不好」的文件、拖延收敛却无果。
+            int latest = latestRewriteAttempt(taskId, f);
+            if (latest + 1 > properties.maxRewriteAttempts()) {
+                log.warn("文件 {} 重写尝试已用尽（最新 attempt={}），跳过精准重跑", f, latest);
+                continue;
+            }
+            insertRetryNode(taskId, rewriteKey(f), NodeType.REWRITE, List.of(baseId), latest + 1);
+            retried++;
+        }
+        if (retried == 0) {
+            log.warn("VERIFY 失败，但所有仍含旧 import 的文件都已耗尽改写次数，任务将无法收敛");
+            return;
+        }
+
+        int nextRound = countVerifyFailures(taskId); // 本次失败已计入，故下一轮编号 = 已失败轮数
+        if (scanEmpty) {
+            log.info("↻ 已派生第 {} 轮整仓重跑（全部 {} 个文件，其中 {} 个重新改写）",
+                    nextRound + 1, toRewrite.size(), retried);
+        } else {
+            log.info("↻ 已派生第 {} 轮针对性重跑（{} 个文件仍含旧 import：{}）",
+                    nextRound + 1, retried, toRewrite);
+        }
+
+        // 重铺整仓 VERIFY：依赖「每文件最新一轮的 REWRITE」，并作废所有仍 PENDING 的旧 VERIFY，
+        // 避免依赖错位导致 VERIFY 在重跑完成前抢跑（抢跑会让「改到一半的工程」被当作验证对象）。
+        reissueBatchVerify(taskId);
+        publish(ProgressEvent.taskStatus(taskId, TaskStatus.RUNNING.name(),
+                "第 " + (nextRound + 1) + " 轮精准重跑已排入队列"));
+    }
+
+    /** 真正失败的整仓 VERIFY 轮数（SKIPPED 的「重铺」节点不计入，否则上限会被节点 attempt 胀穿）。 */
+    private int countVerifyFailures(long taskId) {
+        return (int) taskStore.findNodes(taskId).stream()
+                .filter(node -> node.nodeType() == NodeType.VERIFY
+                        && node.status() == NodeStatus.FAILED)
+                .count();
+    }
+
+    /** 某个文件的 REWRITE 最新一轮（取最大 attempt）；没有 REWRITE 节点时返回 -1。 */
+    private int latestRewriteAttempt(long taskId, String filePath) {
+        String fileKey = filePath == null ? "" : filePath;
+        return taskStore.findNodes(taskId).stream()
+                .filter(node -> node.nodeType() == NodeType.REWRITE
+                        && fileKey.equals(keySuffixOrDefault(node.nodeKey())))
+                .mapToInt(DagNode::attempt)
+                .max()
+                .orElse(-1);
+    }
+
+    /** 与 {@link #keySuffix} 同口径，但空键归一为 ""，便于按文件聚合。 */
+    private static String keySuffixOrDefault(String nodeKey) {
+        String suffix = keySuffix(nodeKey);
+        return suffix == null ? "" : suffix;
+    }
+
+    /**
+     * 收集本次迁移涉及的全部目标文件（去重，按 REWRITE 节点键还原文件路径）。
+     *
+     * <p>裸键（隐式单文件模式）统一归到 ""，与 {@link #keySuffix} 的口径一致。
+     */
+    private List<String> collectTargetFiles(long taskId) {
+        LinkedHashSet<String> files = new LinkedHashSet<>();
+        for (DagNode node : taskStore.findNodes(taskId)) {
+            if (node.nodeType() != NodeType.REWRITE) {
+                continue;
+            }
+            String fileKey = keySuffix(node.nodeKey());
+            files.add(fileKey == null ? "" : fileKey);
+        }
+        return new ArrayList<>(files);
+    }
+
+    /**
+     * 工作目录里仍含「需迁移的旧 import」（javax.* → jakarta 的白名单项、或 JDK 移除包）的文件清单。
+     *
+     * <p>这是批语义收敛性的关键：VERIFY 整仓失败后，只重跑这些文件，
+     * 干净文件不重跑 → 不会触发「模型返回原样 → +0/-0 → 被判失败 → 死循环」。
+     * 返回空表示工作目录里所有目标文件都已干净（仍失败则原因不在迁移范围）。
+     */
+    private List<String> filesStillNeedingMigration(long taskId, Path workspace) {
+        List<String> result = new ArrayList<>();
+        for (String filePath : collectTargetFiles(taskId)) {
+            Path target = workspace.resolve(filePath).normalize();
+            if (!target.startsWith(workspace) || !Files.isRegularFile(target)) {
+                continue;
+            }
+            try {
+                String source = Files.readString(target, StandardCharsets.UTF_8);
+                if (fileStillHasOldImports(source)) {
+                    result.add(filePath);
+                }
+            } catch (IOException e) {
+                log.warn("读取工作目录文件失败，跳过扫描 {}: {}", filePath, e.getMessage());
+            }
+        }
+        return result;
+    }
+
+    /** 文件是否仍含需迁移的旧 import：命中 JDK 移除包，或 javax → jakarta 白名单项。 */
+    private static boolean fileStillHasOldImports(String source) {
+        // 与 RewriteNode 的「改写后残留旧 import 校验」共用同一套判定，避免两套口径对不上
+        return LegacyImportDetector.hasLeftover(source);
+    }
+
+    /**
+     * 重铺整仓 VERIFY，使其依赖「每文件最新一轮的 REWRITE」。
+     *
+     * <p>批语义下 VERIFY 只有一条、但依赖全部改写。回退会往 DAG 里追加下一轮的 REWRITE，
+     * 旧的 VERIFY 依赖的是上一轮改写（可能已失败或将被重跑），必须重铺：
+     * 取每文件 attempt 最大的 REWRITE 作为新依赖，并跳过所有还 PENDING 的旧 VERIFY
+     * （它们依赖错位，抢跑会让「改到一半的工程」被当作验证对象，且会与新 VERIFY 抢同一轮）。
+     */
+    private void reissueBatchVerify(long taskId) {
+        Map<String, DagNode> latestRewriteByFile = new LinkedHashMap<>();
+        for (DagNode node : taskStore.findNodes(taskId)) {
+            if (node.nodeType() != NodeType.REWRITE) {
+                continue;
+            }
+            String fileKey = keySuffix(node.nodeKey());
+            fileKey = fileKey == null ? "" : fileKey;
+            DagNode current = latestRewriteByFile.get(fileKey);
+            if (current == null || node.attempt() > current.attempt()) {
+                latestRewriteByFile.put(fileKey, node);
+            }
+        }
+        List<Long> deps = latestRewriteByFile.values().stream().map(DagNode::id).toList();
+
+        int newAttempt = taskStore.findNodes(taskId).stream()
+                .filter(n -> n.nodeType() == NodeType.VERIFY)
+                .mapToInt(DagNode::attempt)
+                .max()
+                .orElse(-1) + 1;
+        for (DagNode node : taskStore.findNodes(taskId)) {
+            if (node.nodeType() == NodeType.VERIFY
+                    && node.status() == NodeStatus.PENDING
+                    && node.attempt() < newAttempt) {
+                taskStore.markNodeSkipped(node.id(), "回退重铺 VERIFY，旧 VERIFY 依赖错位已跳过");
+            }
+        }
+        taskStore.insertNode(taskId, VerifyNode.NODE_KEY, NodeType.VERIFY, deps, newAttempt);
     }
 
     /** 把某个仍处于 PENDING/RUNNING 的节点标记为 SKIPPED（已是终态则不动）。 */
@@ -570,20 +771,38 @@ public class DagScheduler {
     }
 
     /**
+     * 幂等插入重试节点：若 {@code (taskId, nodeKey, attempt)} 已存在则复用既有 id，不再插入。
+     *
+     * <p>必要性：多文件场景下，同一个文件的 {@code REWRITE} 与 {@code VERIFY} 可能先后失败，
+     * 各自触发一次 {@link #planRetry}；两次都会尝试派生 {@code (file, attempt+1)} 的
+     * REWRITE/VERIFY 节点，第二次插入会撞上 {@code uk_dag_node_task_key_attempt} 唯一约束，
+     * 直接让整个任务 abort。先查后插可彻底消除这条碰撞路径。Worker 是单线程消费循环，
+     * 不存在并发插入竞争，故无需数据库层的 {@code ON CONFLICT}。
+     */
+    private long insertRetryNode(long taskId, String nodeKey, NodeType nodeType,
+                                List<Long> dependsOn, int attempt) {
+        return taskStore.findNode(taskId, nodeKey, attempt)
+                .map(DagNode::id)
+                .orElseGet(() -> taskStore.insertNode(taskId, nodeKey, nodeType, dependsOn, attempt));
+    }
+
+    /**
      * 取出要喂给本轮重写的失败反馈。
      *
-     * <p>优先取上一轮 VERIFY 的失败信息（最具体：失败用例名、编译错误行），
-     * 没有就退回上一轮 REWRITE 的失败原因（比如 Guardrail 判定的产出不合法）。
+     * <p>批语义下只有一条整仓 VERIFY，其失败信息最具体（整仓编译错、失败用例名、编译错误定位行），
+     * 优先取<b>最近一次失败的 VERIFY</b>。没有 VERIFY 失败（如 REWRITE 先于 VERIFY 失败、
+     * 整仓 VERIFY 还没机会跑）则退回<b>同一文件上一轮 REWRITE</b> 自身的失败原因
+     * （例如 Guardrail 判定的产出不合法）。
      */
     private String resolveRetryFeedback(long taskId, DagNode node) {
         if (node.nodeType() != NodeType.REWRITE || node.attempt() == 0) {
             return null;
         }
-        // 取「同一文件」上一轮的信息，避免多文件下把别的文件的失败反馈喂错给这一轮
         String filePath = keySuffix(node.nodeKey());
         int previous = node.attempt() - 1;
-        return taskStore.findNode(taskId, verifyKey(filePath), previous)
-                .filter(n -> n.status() == NodeStatus.FAILED)
+        return taskStore.findNodes(taskId).stream()
+                .filter(n -> n.nodeType() == NodeType.VERIFY && n.status() == NodeStatus.FAILED)
+                .max(Comparator.comparingLong(DagNode::id))
                 .map(DagNode::error)
                 .or(() -> taskStore.findNode(taskId, rewriteKey(filePath), previous)
                         .filter(n -> n.status() == NodeStatus.FAILED)
@@ -659,6 +878,40 @@ public class DagScheduler {
                 writeReplayFile(workspace, change.filePath(), change.newContent());
             }
         }
+
+        // DEPENDENCY_UPGRADE 的产出同样要重放：它往 pom 里注入 jakarta 依赖，这些改动不在任何
+        // REWRITE 节点产物里。任务一旦挂起再重新入队，沙箱是重建的，依赖注入会被悄悄洗掉，
+        // 后续 VERIFY 于是在「缺 jakarta 依赖」下编译改写后的 jakarta.* import 而必然失败 ——
+        // 而失败原因看起来是「代码写错了」。与 POM_REWRITE 同一道坑，用重放堵死。
+        for (DagNode node : taskStore.findNodes(taskId)) {
+            if (node.nodeType() != NodeType.DEPENDENCY_UPGRADE || node.status() != NodeStatus.SUCCEEDED) {
+                continue;
+            }
+            DependencyUpgradeResult depUpgrade = json.read(node.resultJson(), DependencyUpgradeResult.class).orElse(null);
+            if (depUpgrade == null) {
+                continue;
+            }
+            for (DependencyUpgradeResult.FileChange change : depUpgrade.files()) {
+                writeReplayFile(workspace, change.filePath(), change.newContent());
+            }
+        }
+
+        // PARENT_UPGRADE 的产出也要重放：它把 spring-boot-starter-parent 升到 3.x，这些改动同样不在任何
+        // REWRITE 节点产物里。任务一旦挂起再重新入队，沙箱是重建的，parent 版本会悄悄退回升级前，
+        // 后续 VERIFY 于是在旧 BOM（javax 命名空间）下编译改写后的 jakarta.* import 而必然失败 ——
+        // 而失败原因看起来是「代码写错了」。与前两者同一道坑，用重放堵死。
+        for (DagNode node : taskStore.findNodes(taskId)) {
+            if (node.nodeType() != NodeType.PARENT_UPGRADE || node.status() != NodeStatus.SUCCEEDED) {
+                continue;
+            }
+            ParentUpgradeResult parentUpgrade = json.read(node.resultJson(), ParentUpgradeResult.class).orElse(null);
+            if (parentUpgrade == null) {
+                continue;
+            }
+            for (ParentUpgradeResult.FileChange change : parentUpgrade.files()) {
+                writeReplayFile(workspace, change.filePath(), change.newContent());
+            }
+        }
     }
 
     /** 把一个重放产物写到工作目录（失败只告警：重放不是任务成立的充分条件，VERIFY 才是）。 */
@@ -694,6 +947,13 @@ public class DagScheduler {
         Map<String, DagNode> latestVerifyByFile = new LinkedHashMap<>();
         for (DagNode node : nodes) {
             if (node.nodeType() != NodeType.VERIFY) {
+                continue;
+            }
+            // 跳过从未真正执行的 PENDING：它只是「已铺开但还没轮到」，没有 error。
+            // 若把它当成最新一轮，失败原因会从真实编译错误退化成「没有产生 VERIFY 节点」这种假话
+            // —— 实测 #57/#58 都栽在这里：真正跑过的 VERIFY 明明报了编译失败，却被 PENDING 顶掉，
+            // 于是排查方向被彻底带偏（看起来像「根本没验证」，实际是「验证了但没编过」）。
+            if (node.status() == NodeStatus.PENDING) {
                 continue;
             }
             String fileKey = keySuffix(node.nodeKey());
@@ -886,11 +1146,7 @@ public class DagScheduler {
         return filePath == null ? RewriteNode.NODE_KEY : RewriteNode.nodeKey(filePath);
     }
 
-    private static String verifyKey(String filePath) {
-        return filePath == null ? VerifyNode.NODE_KEY : VerifyNode.nodeKey(filePath);
-    }
-
-    /** 门禁节点键：与 rewrite/verify 同款——有文件用带文件的键，否则退回裸键。 */
+    /** 门禁节点键：与 rewrite 同款——有文件用带文件的键，否则退回裸键。 */
     private static String gateKey(String filePath) {
         return filePath == null ? GateNode.NODE_KEY : GateNode.nodeKey(filePath);
     }

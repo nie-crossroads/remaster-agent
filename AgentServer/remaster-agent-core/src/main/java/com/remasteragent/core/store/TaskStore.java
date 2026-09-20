@@ -189,13 +189,15 @@ public interface TaskStore {
     int countNodes(long taskId, NodeStatus status);
 
     /**
-     * VERIFY 的<b>执行轮次</b>（最大 attempt + 1），&gt;1 说明发生过回退重写。
+     * VERIFY 的<b>执行轮次</b>（去重后的 distinct attempt，排除 SKIPPED），&gt;1 说明发生过回退重写。
      *
      * <p>注意是「轮次」不是「节点数」：PLAN 可以为一次任务规划多个文件，
      * 每个文件各有一串 {@code verify:<file>} 节点（attempt 从 0 起）。
      * 早先这里统计的是 VERIFY 节点总数，于是「4 个文件各跑一轮」也会得到 4，
      * 被 {@code TaskMetrics.retried()} 读成「回退过 3 次」——
-     * 一次干净的多文件迁移会被报告成反复重试。轮次必须取 attempt 的最大值。
+     * 一次干净的多文件迁移会被报告成反复重试。轮次必须取 distinct attempt，且<b>排除</b>被回退重铺、
+     * 最终 SKIPPED 的节点 —— 否则 {@code reissueBatchVerify} 因 REWRITE 失败而自增的节点 attempt
+     * 会把轮次胀穿，让「回退轮次」这个指标彻底失真。
      */
     int countVerifyRounds(long taskId);
 

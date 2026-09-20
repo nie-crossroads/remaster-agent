@@ -364,12 +364,14 @@ public class JdbcTaskStore implements TaskStore {
 
     @Override
     public int countVerifyRounds(long taskId) {
-        // 轮次 = 最大 attempt + 1，不是节点总数：多文件计划里每个文件各有一串 VERIFY 节点，
-        // 按 COUNT(*) 统计会把「N 个文件各跑一轮」误报成「回退了 N-1 次」。
+        // 轮次 = 真正执行过的 VERIFY 轮数（去重后的 distinct attempt），不是节点总数，
+        // 也不是「最大 attempt + 1」。多文件计划里每个文件各有一串 VERIFY 节点，按 COUNT(*) 会把
+        // 「N 个文件各跑一轮」误报成「回退了 N-1 次」；而被回退重铺、最终 SKIPPED 的 VERIFY 节点
+        // （reissueBatchVerify 因 REWRITE 失败而自增的 attempt）必须排除，否则轮次会被胀穿。
         // 没有 VERIFY 节点时 COALESCE 回落 0 —— 那是「没跑过」，不能报 1。
         Integer rounds = jdbc.queryForObject("""
-                SELECT COALESCE(MAX(attempt) + 1, 0) FROM dag_node
-                 WHERE task_id = ? AND node_type = 'VERIFY'
+                SELECT COALESCE(COUNT(DISTINCT attempt), 0) FROM dag_node
+                 WHERE task_id = ? AND node_type = 'VERIFY' AND status <> 'SKIPPED'
                 """, Integer.class, taskId);
         return rounds == null ? 0 : rounds;
     }

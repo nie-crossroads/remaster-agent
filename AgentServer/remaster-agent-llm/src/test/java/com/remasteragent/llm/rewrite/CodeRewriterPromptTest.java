@@ -55,6 +55,34 @@ class CodeRewriterPromptTest {
     }
 
     @Test
+    void 框架破坏性变更提示进入用户消息() {
+        // 首轮（attempt=0）也要带上：这类提示来自确定性扫描，不是上一次失败的反馈。
+        // 少了这一节，模型看着一个 javax 已全改完的文件只会认为它无需改动。
+        RewriteCommand command = new RewriteCommand(
+                "src/main/java/com/example/Demo.java", "com.example", "Demo",
+                SOURCE, 21, 0, null, List.of(), null,
+                List.of("Spring 6 的 HttpComponentsClientHttpRequestFactory 只接受 HttpClient 5"));
+
+        String prompt = CodeRewriter.buildUserPrompt(command);
+
+        assertTrue(prompt.contains("破坏性变更"), "应出现破坏性变更小节: " + prompt);
+        assertTrue(prompt.contains("HttpClient 5"), "提示正文必须在 prompt 里: " + prompt);
+        assertTrue(prompt.indexOf("破坏性变更") < prompt.indexOf("Source code to modernize"),
+                "提示应排在源码之前，否则容易被长源码挤到模型注意力之外");
+    }
+
+    @Test
+    void 没有破坏性变更提示时不出现该小节() {
+        RewriteCommand command = new RewriteCommand(
+                "src/main/java/com/example/Demo.java", "com.example", "Demo",
+                SOURCE, 21, 0, null, List.of(), null, List.of());
+
+        String prompt = CodeRewriter.buildUserPrompt(command);
+
+        assertFalse(prompt.contains("破坏性变更"), "没命中就不该凭空加一节: " + prompt);
+    }
+
+    @Test
     void 没有检索结果时不出现相关代码小节() {
         RewriteCommand command = new RewriteCommand(
                 "src/main/java/com/example/Demo.java", "com.example", "Demo",
