@@ -251,8 +251,19 @@ public final class MavenResultParser {
         if (compilationFailed || sb.length() == 0) {
             List<String> errorBlocks = extractCompileErrors(console, projectDir, DEFAULT_MAX_ERROR_LINES);
             if (!errorBlocks.isEmpty()) {
-                sb.append("编译错误（按「符号/位置」修正，不要删改测试依赖的成员）:\n");
-                errorBlocks.forEach(block -> sb.append("  ").append(block).append('\n'));
+                CompileErrorClassifier.CompileErrorReport report =
+                        CompileErrorClassifier.classify(errorBlocks);
+                // 自动归类后，模型拿到的不再是「一堆看不出所以然的诊断」，而是「这类错该怎么改」的定向提示；
+                // 类别计数打日志，让「这一轮编译错主要卡在哪类」在监控上可见，而不是表现成「任务失败了但看不出为什么」。
+                log.info("编译错误归类：总数={} jakarta漏改={} API签名={} 依赖未解析={} 测试源集={} 未归类={}",
+                        report.total(), report.jakartaLeftover(), report.apiSignature(),
+                        report.dependencyUnresolved(), report.testSource(), report.unclassified());
+                sb.append("编译错误（已按类别自动归类，按类别定向修正；不要删改测试依赖的成员）:\n");
+                for (CompileErrorClassifier.ClassifiedError error : report.errors()) {
+                    sb.append("  [").append(CompileErrorClassifier.categoryLabel(error.category()))
+                            .append("] ").append(error.block()).append('\n');
+                    sb.append("    提示: ").append(error.hint()).append('\n');
+                }
             }
         }
 
