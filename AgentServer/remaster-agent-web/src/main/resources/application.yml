@@ -100,6 +100,11 @@ remaster:
     # 见 worker 的 application.yml 说明
     input-price-per-million: ${LLM_INPUT_PRICE:0}
     output-price-per-million: ${LLM_OUTPUT_PRICE:0}
+    # 上下文治理（输入侧 token 预算，见 worker 的 application.yml 说明）。
+    # API 侧不调模型，但保留同一组配置，避免两个进程对同一份 .env 的解释不一致。
+    context:
+      max-tokens: ${LLM_CONTEXT_MAX_TOKENS:3000}
+      enabled: ${LLM_CONTEXT_ENABLED:true}
 
   worker:
     # true = Worker 跑在 API 进程内（开发省事）；部署与演示请设 false，用独立 Worker 进程。

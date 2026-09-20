@@ -2,6 +2,7 @@ package com.remasteragent.llm.rewrite;
 
 import com.remasteragent.common.rag.CodeChunk;
 import com.remasteragent.common.rag.RetrievedChunk;
+import com.remasteragent.llm.context.ContextBudget;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -111,5 +112,43 @@ class CodeRewriterPromptTest {
         assertTrue(prompt.contains("编译失败: 找不到符号 Date"));
         assertTrue(prompt.contains("return Instant.now();"));
         assertTrue(prompt.contains("hits: neighbor"), "邻居扩展进来的块也要如实标注来源");
+    }
+
+    @Test
+    void 预算不足时低优先级块被丢弃并标注省略() {
+        // 高优先级（rank=1）块保留，低优先级（rank=2）块被上下文预算裁掉
+        RewriteCommand command = new RewriteCommand(
+                "src/main/java/com/example/Demo.java", "com.example", "Demo",
+                SOURCE, 21, 0, null,
+                List.of(
+                        new RetrievedChunk(new CodeChunk("A.java", "A#m", CodeChunk.KIND_METHOD, 1, 2, "return a();"),
+                                1, List.of(RetrievedChunk.SOURCE_SYMBOL)),
+                        new RetrievedChunk(new CodeChunk("B.java", "B#m", CodeChunk.KIND_METHOD, 1, 2, "return b();"),
+                                2, List.of(RetrievedChunk.SOURCE_KEYWORD))));
+
+        // 极小预算：首项保底入选，次项丢弃
+        String prompt = CodeRewriter.buildUserPrompt(command, ContextBudget.of(2, true));
+
+        assertTrue(prompt.contains("A.java"), "高优先级块应保留: " + prompt);
+        assertTrue(prompt.contains("omitted"), "应出现省略标注: " + prompt);
+        assertFalse(prompt.contains("B.java"), "低优先级块应被丢弃: " + prompt);
+    }
+
+    @Test
+    void 关闭治理时相关代码全量透传() {
+        RewriteCommand command = new RewriteCommand(
+                "src/main/java/com/example/Demo.java", "com.example", "Demo",
+                SOURCE, 21, 0, null,
+                List.of(
+                        new RetrievedChunk(new CodeChunk("A.java", "A#m", CodeChunk.KIND_METHOD, 1, 2, "return a();"),
+                                1, List.of(RetrievedChunk.SOURCE_SYMBOL)),
+                        new RetrievedChunk(new CodeChunk("B.java", "B#m", CodeChunk.KIND_METHOD, 1, 2, "return b();"),
+                                2, List.of(RetrievedChunk.SOURCE_KEYWORD))));
+
+        String prompt = CodeRewriter.buildUserPrompt(command, ContextBudget.disabled());
+
+        assertTrue(prompt.contains("A.java"));
+        assertTrue(prompt.contains("B.java"));
+        assertFalse(prompt.contains("omitted"), "关闭治理不应有省略标注");
     }
 }

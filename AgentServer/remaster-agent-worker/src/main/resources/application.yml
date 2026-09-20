@@ -131,6 +131,14 @@ remaster:
     # 默认 0：宁可显示「未配置」也不猜一个数，猜出来的成本比没有成本更糟。
     input-price-per-million: ${LLM_INPUT_PRICE:0}
     output-price-per-million: ${LLM_OUTPUT_PRICE:0}
+    # ---------- 上下文治理（输入侧 token 预算，阶段 5 后续）----------
+    # 每次改写投喂给模型的「相关代码」上下文 token 上限（按 chars/4 估算）。
+    # 超过则按 RRF 排名从低优先级开始丢弃，保住真正要改的源码在 prompt 里的主导地位。
+    # 默认 3000（≈ 12000 字符，与旧硬编码上限一致，历史行为不变）。
+    context:
+      max-tokens: ${LLM_CONTEXT_MAX_TOKENS:3000}
+      # 治理总开关：false = 检索召回全量透传，不做预算裁剪（排查「是不是上下文被砍」时关它）。
+      enabled: ${LLM_CONTEXT_ENABLED:true}
 
   queue:
     stream-key: remaster:tasks

@@ -1,5 +1,6 @@
 package com.remasteragent.llm.config;
 
+import com.remasteragent.llm.context.ContextBudget;
 import com.remasteragent.llm.embedding.EmbeddingProvider;
 import com.remasteragent.llm.embedding.HttpEmbeddingProvider;
 import com.remasteragent.llm.embedding.NoopEmbeddingProvider;
@@ -28,7 +29,7 @@ import java.time.Duration;
  * 靠的是 prompt 约束和产出校验（Guardrail），不是采样温度。
  */
 @Configuration
-@EnableConfigurationProperties(LlmProperties.class)
+@EnableConfigurationProperties({LlmProperties.class, ContextGovernanceProperties.class})
 public class LlmConfig {
 
     private static final Logger log = LoggerFactory.getLogger(LlmConfig.class);
@@ -88,6 +89,20 @@ public class LlmConfig {
                 properties.maxRetries(),
                 properties.retryBackoffMillis(),
                 properties.callBudgetSeconds());
+    }
+
+    /**
+     * 上下文预算（输入侧 token 预算）Bean —— 由 {@code remaster.llm.context.*} 配置构建。
+     *
+     * <p>和重试策略一样，预算属于部署配置，集中在一处定义：改上限、开关治理都只动 yml / .env，
+     * 不散落到改写器里。属性为空或非法时回落 {@link ContextBudget#DEFAULT}（3000 token，与旧上限一致）。
+     */
+    @Bean
+    public ContextBudget contextBudget(ContextGovernanceProperties properties) {
+        ContextBudget budget = ContextBudget.from(properties);
+        log.info("上下文治理：{}｜预算={}token",
+                budget.enabled() ? "启用" : "关闭（全量透传）", budget.maxTokens());
+        return budget;
     }
 
     private ChatModel buildModel(LlmProperties properties, String modelName) {

@@ -7,6 +7,10 @@ import com.remasteragent.common.rag.CodeChunk;
 import com.remasteragent.common.rag.RetrievedChunk;
 import com.remasteragent.llm.config.LlmPurpose;
 import com.remasteragent.llm.config.ModelRegistry;
+import com.remasteragent.llm.context.ContextBudget;
+import com.remasteragent.llm.context.ContextCurator;
+import com.remasteragent.llm.context.ContextItem;
+import com.remasteragent.llm.context.CuratedContext;
 import com.remasteragent.llm.retry.LlmRetryExecutor;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -19,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -42,15 +47,14 @@ public class CodeRewriter {
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     /**
-     * 检索上下文进 prompt 的字符预算（约 3k token）。
+     * 检索上下文进 prompt 的预算（token 上限），来自 {@link ContextBudget}（{@code remaster.llm.context.*}）。
      *
      * <p>设这个上限不是抠门，而是为了保住「要改的文件」在 prompt 里的主导地位：
      * 一个依赖大户能召回几十块代码，不设限的话模型会花注意力去理解无关代码，
-     * 真正要改的 {@code sourceContent} 反而被挤到很后面。超预算按融合排名先后截断 ——
-     * 排名靠前的块先保住，这与 RRF 的意图一致。
+     * 真正要改的 {@code sourceContent} 反而被挤到很后面。超预算按 RRF 排名从低优先级开始丢弃 ——
+     * 排名靠前的块先保住，这与 RRF 的意图一致。默认 3000 token（≈ 12000 字符），
+     * 与旧的硬编码上限一致；现在改为按 token 计量、可配置、可观测（见 {@link ContextCurator}）。
      */
-    private static final int MAX_CONTEXT_CHARS = 12_000;
-
     private static final String SYSTEM_PROMPT = """
             You are a Java code modernization engine. You rewrite ONE Java file so that it uses
             modern Java %d idioms while preserving its observable behavior exactly.
@@ -87,24 +91,34 @@ public class CodeRewriter {
 
     private final ModelRegistry modelRegistry;
     private final LlmRetryExecutor retryExecutor;
+    private final ContextBudget contextBudget;
 
     /** 单参数入口：不重试、直调一次。供桩件与单测使用（它们不需要真实重试语义）。 */
     public CodeRewriter(ModelRegistry modelRegistry) {
-        this(modelRegistry, null);
+        this(modelRegistry, null, null);
+    }
+
+    /** 不带预算配置时的入口：用默认预算（3000 token，与旧上限一致）。 */
+    public CodeRewriter(ModelRegistry modelRegistry, LlmRetryExecutor retryExecutor) {
+        this(modelRegistry, retryExecutor, null);
     }
 
     /**
-     * 生产入口：重试由 {@link LlmRetryExecutor} 接管，SDK 内层重试已在 {@code LlmConfig} 关闭。
+     * 生产入口：重试由 {@link LlmRetryExecutor} 接管，SDK 内层重试已在 {@code LlmConfig} 关闭；
+     * 上下文预算由 {@link ContextBudget} 注入（来自 {@code remaster.llm.context.*}）。
      *
      * <p><b>为什么把执行器当参数接进来，而不是在这里 new 一个</b>：两个原因。
      * 一是重试策略属于部署配置（重试几次、退避多久、总预算多少），只应有一处定义；
      * 二是「每次尝试失败要通知谁」这件事改写器无从知晓 —— 任务 id、节点 id、进度发布口
      * 都在调用方手上。所以这里只负责「按策略重试并如实回调」，不负责决定回调的去向。
+     * 上下文预算同理：由配置层统一决定，这里只负责「按预算裁剪并如实记录」。
      */
     @Autowired
-    public CodeRewriter(ModelRegistry modelRegistry, LlmRetryExecutor retryExecutor) {
+    public CodeRewriter(ModelRegistry modelRegistry, LlmRetryExecutor retryExecutor,
+                        ContextBudget contextBudget) {
         this.modelRegistry = modelRegistry;
         this.retryExecutor = retryExecutor == null ? LlmRetryExecutor.noRetry() : retryExecutor;
+        this.contextBudget = contextBudget == null ? ContextBudget.DEFAULT : contextBudget;
     }
 
     /**
@@ -120,7 +134,7 @@ public class CodeRewriter {
 
         List<ChatMessage> messages = List.of(
                 SystemMessage.from(SYSTEM_PROMPT.formatted(command.targetJdk())),
-                UserMessage.from(buildUserPrompt(command)));
+                UserMessage.from(buildUserPrompt(command, contextBudget)));
 
         long startedAt = System.currentTimeMillis();
         // 重试在这里发生，而不是在 SDK 内部：SDK 的重试是静默的，节点与前端都看不到，
@@ -184,6 +198,13 @@ public class CodeRewriter {
      * {@code ChatModel} —— 后者测的是框架胶水，前者测的是我们自己的契约。
      */
     static String buildUserPrompt(RewriteCommand command) {
+        return buildUserPrompt(command, ContextBudget.DEFAULT);
+    }
+
+    /**
+     * 带上下文预算的拼装入口 —— 生产路径用注入的预算，单测可显式指定预算验证裁剪行为。
+     */
+    static String buildUserPrompt(RewriteCommand command, ContextBudget budget) {
         StringBuilder sb = new StringBuilder();
         sb.append("File path: ").append(command.filePath()).append('\n');
         if (command.packageName() != null && !command.packageName().isBlank()) {
@@ -214,7 +235,7 @@ public class CodeRewriter {
             sb.append("--- 破坏性变更清单结束 ---\n");
         }
 
-        appendRelatedCode(sb, command);
+        appendRelatedCode(sb, command, budget);
 
         sb.append("\nSource code to modernize:\n```java\n");
         sb.append(command.sourceContent());
@@ -223,40 +244,56 @@ public class CodeRewriter {
     }
 
     /**
-     * 把检索到的相关代码块拼进 prompt —— 跨文件改写的「上下文」就在这里落地。
+     * 把检索到的相关代码块拼进 prompt —— 跨文件改写的「上下文」就在这里落地，并过一遍上下文治理。
      *
-     * <p>刻意把检索来源（vector / keyword / symbol / neighbor）也标出来：模型据此能判断
-     * 这块代码是「按名字召回的」还是「按语义召回的」，对可信度有直觉；人也一样，
-     * 调检索参数时能一眼看出某块为什么进来。
+     * <p>治理动作（见 {@link ContextCurator}）：按正文去重、按 RRF 排名（{@link RetrievedChunk#rank()}）
+     * 重排、按 token 预算贪心裁剪，超预算从低优先级开始丢弃；真正要改的源码在后面单独追加、永远在场。
+     * 单块还有一道硬上限（默认预算 × 4 字符），防止「一个巨无霸块」一口吃掉整段预算。
+     * 每次调用都会打一行可观测日志：预算 / 入选 / 丢弃 / 估算使用 / 是否溢出。
      *
-     * <p>每次调用都截断到 {@link #MAX_CONTEXT_CHARS}：检索结果整体进 prompt，
-     * 不做上限的话一个「依赖大户」文件能把上下文预算吃光，反而把真正要改的源码挤到后面。
+     * <p>检索来源（vector / keyword / symbol / neighbor）如实标注：模型据此能判断这块代码是
+     * 「按名字召回的」还是「按语义召回的」，对可信度有直觉；人也一样，调检索参数时能一眼看出
+     * 某块为什么进来。
      */
-    private static void appendRelatedCode(StringBuilder sb, RewriteCommand command) {
+    private static void appendRelatedCode(StringBuilder sb, RewriteCommand command, ContextBudget budget) {
         if (!command.hasContext()) {
             return;
         }
         sb.append("\n--- Related code from the same project (reference only, DO NOT rewrite these files) ---\n");
 
-        int budget = MAX_CONTEXT_CHARS;
-        int index = 1;
+        // 单块硬上限：保护「单块巨无霸」不会一口吃掉整段预算（默认 3000 token ≈ 12000 字符，与旧上限一致）
+        int perItemChars = budget.enabled() ? budget.maxTokens() * 4 : Integer.MAX_VALUE;
+        List<ContextItem> items = new ArrayList<>();
         for (RetrievedChunk retrieved : command.contextChunks()) {
-            if (budget <= 0) {
-                sb.append("(more related blocks omitted for brevity)\n");
-                break;
-            }
             CodeChunk chunk = retrieved.chunk();
-            sb.append('\n').append('[').append(index++).append("] ").append(chunk.displayTitle())
-                    .append(" | ").append(chunk.filePath())
-                    .append(" | hits: ").append(String.join("+", retrieved.sources()))
-                    .append('\n');
-
             String content = chunk.content() == null ? "" : chunk.content();
-            if (content.length() > budget) {
-                content = content.substring(0, budget) + "\n// ... (truncated)";
+            if (content.length() > perItemChars) {
+                content = content.substring(0, perItemChars) + "\n// ... (truncated)";
             }
-            budget -= content.length();
-            sb.append("```java\n").append(content).append("\n```\n");
+            items.add(new ContextItem(
+                    retrieved.rank(),
+                    chunk.displayTitle(),
+                    chunk.filePath(),
+                    retrieved.sources(),
+                    content,
+                    chunk.displayTitle()));
+        }
+
+        CuratedContext curated = ContextCurator.curate(budget, items);
+        if (budget.enabled()) {
+            log.info("上下文治理｜预算={}token 入选={}/{} 丢弃={} 估算使用≈{}token 溢出={}",
+                    budget.maxTokens(), curated.selected().size(), items.size(),
+                    curated.droppedCount(), curated.estimatedTokens(), curated.overflow());
+        } else {
+            log.info("上下文治理已关闭，全量透传 {} 块", items.size());
+        }
+
+        int index = 1;
+        for (ContextItem item : curated.selected()) {
+            sb.append(item.render(index++));
+        }
+        if (curated.droppedCount() > 0) {
+            sb.append("(more related blocks omitted for brevity)\n");
         }
         sb.append("--- end of related code ---\n");
     }
