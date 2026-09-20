@@ -13,7 +13,8 @@ package com.remasteragent.tools.sandbox;
  * <ul>
  *   <li>{@link LocalProcessSandboxExecutor} —— 本机受限子进程。限超时、限内存、独立工作目录，
  *       但<b>不提供文件系统与网络隔离</b>，只能用于自有可信工程。</li>
- *   <li>Docker 容器实现 —— 计划中，需本机装 Docker。</li>
+ *   <li>{@link DockerSandboxExecutor} —— Docker 容器真隔离：{@code --network none} + 只读根文件系统
+ *       + 非 root + 资源封顶。向用户开放自传仓库时必须用这个，部署机需预装 Docker。</li>
  * </ul>
  *
  * <p>实现必须遵守的约定：

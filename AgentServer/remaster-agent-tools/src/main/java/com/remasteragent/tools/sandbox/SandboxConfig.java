@@ -14,7 +14,7 @@ import java.nio.file.Paths;
  *
  * <p>这里体现的是「可替换的隔离实现」怎么落地：上层（VERIFY 节点）只依赖
  * {@link SandboxExecutor} 接口，具体用哪种隔离由配置决定、由这里装配。
- * 装好 Docker 之后，只需要在这里补一个分支，其余代码一行不用改。
+ * 切换隔离实现只改这一个分支，其余代码一行不用改。
  */
 @Configuration
 @EnableConfigurationProperties(SandboxProperties.class)
@@ -25,9 +25,11 @@ public class SandboxConfig {
     @Bean
     public SandboxExecutor sandboxExecutor(SandboxProperties properties) {
         if (SandboxProperties.MODE_DOCKER.equals(properties.mode())) {
-            throw new IllegalStateException(
-                    "Docker 沙箱实现尚未接入。当前可用的只有 local 模式（本机受限子进程）。"
-                            + "如果本机还没装 Docker，请把 SANDBOX_MODE 设回 local。");
+            DockerSandboxExecutor executor = new DockerSandboxExecutor(properties, properties.maxOutputChars());
+            executor.verify();
+            log.info("沙箱模式 = docker：容器真隔离（--network none + 只读根fs + 非root + 资源封顶）。"
+                    + "部署机需预装 Docker，且镜像须预装 JDK21+Maven、本地仓库须预热。");
+            return executor;
         }
 
         MavenToolchain toolchain = new MavenToolchain(

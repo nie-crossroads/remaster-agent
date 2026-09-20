@@ -25,7 +25,7 @@ class LocalProcessSandboxExecutorDecodingTest {
     void plainUtf8RoundTrips() {
         String text = "编译失败\nERROR: /src/Foo.java:12: 找不到符号\nBUILD FAILURE";
 
-        String decoded = LocalProcessSandboxExecutor.decodeLenient(text.getBytes(StandardCharsets.UTF_8));
+        String decoded = SandboxIo.decodeLenient(text.getBytes(StandardCharsets.UTF_8));
 
         assertEquals(text, decoded);
     }
@@ -43,7 +43,7 @@ class LocalProcessSandboxExecutorDecodingTest {
         System.arraycopy(stray, 0, mixed, valid.length, stray.length);
         System.arraycopy(trailing, 0, mixed, valid.length + stray.length, trailing.length);
 
-        String decoded = LocalProcessSandboxExecutor.decodeLenient(mixed);
+        String decoded = SandboxIo.decodeLenient(mixed);
 
         // 关键断言：坏字节之前与之后的诊断信息都还在
         assertTrue(decoded.startsWith("BUILD FAILURE"), "坏字节之前的日志不能丢");
@@ -63,7 +63,7 @@ class LocalProcessSandboxExecutorDecodingTest {
         System.arraycopy(gbkPrefix, 0, mixed, 0, gbkPrefix.length);
         System.arraycopy(utf8Error, 0, mixed, gbkPrefix.length, utf8Error.length);
 
-        String decoded = LocalProcessSandboxExecutor.decodeLenient(mixed);
+        String decoded = SandboxIo.decodeLenient(mixed);
 
         assertTrue(decoded.contains("Foo.java:7: error: ';' expected"),
                 "ASCII 的 javac 错误必须完整保留 —— 它才是模型真正要读的部分");
@@ -73,7 +73,7 @@ class LocalProcessSandboxExecutorDecodingTest {
     @Test
     @DisplayName("空输入返回空串，不抛异常")
     void emptyInputIsSafe() {
-        assertEquals("", LocalProcessSandboxExecutor.decodeLenient(new byte[0]));
+        assertEquals("", SandboxIo.decodeLenient(new byte[0]));
     }
 
     @Test

@@ -94,6 +94,14 @@ remaster:
     maven-home: ${MAVEN_HOME}
     maven-settings: ${MAVEN_SETTINGS}
     maven-local-repo: ${MAVEN_LOCAL_REPO}
+    docker:
+      image: ${SANDBOX_DOCKER_IMAGE:}
+      user: ${SANDBOX_DOCKER_USER:}
+      pids-limit: ${SANDBOX_DOCKER_PIDS_LIMIT:256}
+      cpus: ${SANDBOX_DOCKER_CPUS:}
+      container-workspace: ${SANDBOX_DOCKER_CONTAINER_WORKSPACE:}
+      container-maven-repo: ${SANDBOX_DOCKER_CONTAINER_MAVEN_REPO:}
+      container-settings: ${SANDBOX_DOCKER_CONTAINER_SETTINGS:}
 
   llm:
     base-url: ${LLM_BASE_URL}

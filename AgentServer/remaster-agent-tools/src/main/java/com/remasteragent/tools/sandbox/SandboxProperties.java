@@ -9,13 +9,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * 在哪台机器上、以什么代价、执行不可信的代码。分散在多个配置段里最容易出现
  * 「改了超时忘了改内存」这类不一致。
  *
- * @param mode           隔离模式：{@code local}（本机受限子进程）或 {@code docker}（待接入）
+ * @param mode           隔离模式：{@code local}（本机受限子进程）或 {@code docker}（容器真隔离）
  * @param memoryLimitMb  单次执行的内存上限（MB），通过 MAVEN_OPTS 限制 fork 出的 JVM 堆
  * @param timeoutSeconds 单次执行的硬超时（秒），超时后连同子进程树一起强杀
  * @param maxOutputChars 带回的日志上限字符数，超出部分头尾保留、中间省略
  * @param mavenHome      Maven 安装目录
  * @param mavenSettings  settings.xml 路径
  * @param mavenLocalRepo 本地仓库路径
+ * @param docker         Docker 沙箱的可选配置（{@code remaster.sandbox.docker.*}），全可空
  */
 @ConfigurationProperties(prefix = "remaster.sandbox")
 public record SandboxProperties(
@@ -25,7 +26,8 @@ public record SandboxProperties(
         Integer maxOutputChars,
         String mavenHome,
         String mavenSettings,
-        String mavenLocalRepo
+        String mavenLocalRepo,
+        DockerSandboxProperties docker
 ) {
 
     public static final String MODE_LOCAL = "local";
