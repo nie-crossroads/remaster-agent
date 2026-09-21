@@ -67,7 +67,8 @@ public class TaskViewMapper {
                 task.createdAt(),
                 task.updatedAt(),
                 parseMetrics(task.metricsJson()),
-                runDurationMs);
+                runDurationMs,
+                task.demo());
     }
 
     public TaskDetailView toDetail(MigrationTask task, List<DagNode> nodes,

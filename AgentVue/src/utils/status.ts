@@ -67,6 +67,29 @@ export const NODE_TYPE_EMOJI: Record<NodeType, string> = {
 }
 
 /**
+ * 从节点键里解析出「这个节点作用的对象」（相对路径）。
+ *
+ * 节点键的约定是 `<类型>:<相对路径>`，例如 `rewrite:src/main/java/com/example/Foo.java`；
+ * 而**任务级 / 整仓级**的节点只有裸键（`analyze` / `plan` / `verify` / `pom_rewrite` / `gate`），
+ * 因此「有没有冒号」就是「这个节点是不是针对某个文件」的判据 —— 不需要再去猜类型。
+ *
+ * 放在这里而不是各组件各写一遍：执行图（DagGraph）与节点时间线（NodeTimeline）说的是同一件事，
+ * 两处各切一次字符串迟早会不一致（本项目在「同一语义两个来源」上已经付过代价）。
+ */
+export function nodeFileFromKey(nodeKey: string | null | undefined): string | null {
+  if (!nodeKey) return null
+  const colon = nodeKey.indexOf(':')
+  if (colon < 0) return null
+  const rest = nodeKey.slice(colon + 1).trim()
+  return rest === '' ? null : rest
+}
+
+/** 取路径里的文件名：`src/main/java/com/example/Foo.java` → `Foo.java`。 */
+export function fileNameOf(filePath: string): string {
+  return filePath.split(/[\\/]/).pop() ?? filePath
+}
+
+/**
  * 把后端的毫秒数字渲染成人能读的形式：「1m 23s」、「2.4 s」、「750 ms」。
  *
  * 故意不做「几天前 / 几小时前」式相对时间 —— 这个项目里数字都是「这次跑了多久」，

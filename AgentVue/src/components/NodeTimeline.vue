@@ -14,15 +14,17 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 
-import type { DagNode, VerifyResult } from '@/api/types'
+import type { DagNode, NodeType, VerifyResult } from '@/api/types'
 import {
   NODE_STATUS_LABEL,
   NODE_STATUS_TAG,
   NODE_TYPE_EMOJI,
   NODE_TYPE_LABEL,
+  fileNameOf,
   formatCoverage,
   formatDuration,
   formatRound,
+  nodeFileFromKey,
 } from '@/utils/status'
 
 interface Props {
@@ -107,6 +109,28 @@ function isRunning(node: DagNode): boolean {
 }
 
 /**
+ * 「本可以是按文件、但这次是整仓」的节点类型。
+ *
+ * 一次任务可以有多个文件、同一个文件还有多轮 —— 时间线上一行只写「重写 / 验证」，
+ * 根本对不上账：看到 4 条「验证」无从知道它们分别验的是谁。所以凡是带文件路径的节点键
+ * 都要把文件名摆出来，**直接跟在类型名后面**（「重写 LegacyCustomerOrders.java」）——
+ * 就写在节点标题这一行里，不折叠、不藏进 tooltip：要对照「这条重写的是什么」是
+ * 扫一眼列表就要得到的信息，还得把鼠标停上去才看得见等于没有。
+ *
+ * 而 REWRITE / VERIFY / GATE 也可能**没有**文件路径：那表示这一跳作用于整个工程
+ * （典型是整仓 VERIFY，只跑一次全量 `mvn test`）。这种情况也必须在行上写明白 ——
+ * 否则「验证」二字看起来就像「漏标了文件」，而它其实是「全部文件」。
+ */
+const WHOLE_REPO_NODE_TYPES: ReadonlySet<NodeType> = new Set(['REWRITE', 'VERIFY', 'GATE'])
+
+/** 节点作用对象：文件名 / 「整仓（全部文件）」；ANALYZE、PLAN 这类天生整仓的节点返回 null。 */
+function nodeTarget(node: DagNode): string | null {
+  const filePath = nodeFileFromKey(node.nodeKey)
+  if (filePath) return fileNameOf(filePath)
+  return WHOLE_REPO_NODE_TYPES.has(node.nodeType) ? '整仓（全部文件）' : null
+}
+
+/**
  * 后端「节点开始运行」时带的消息是 `REWRITE (attempt 0)` 这种机器文案。
  * 节点类型与轮次卡片上本来就有更好的展示，重复一遍只会挤占空间 ——
  * 所以只在 message 明显携带了额外信息时才展示它（目前主要就是重试提示）。
@@ -161,6 +185,12 @@ function summarizeVerify(v: VerifyResult | null): string {
         <div class="node-head">
           <span class="emoji">{{ NODE_TYPE_EMOJI[node.nodeType] }}</span>
           <span class="title">{{ NODE_TYPE_LABEL[node.nodeType] }}</span>
+          <!--
+            这个节点在动哪个对象，紧跟在类型名后面（「重写 LegacyCustomerOrders.java」）。
+            带文件的节点写文件名，整仓节点写「整仓（全部文件）」—— 判据见 nodeTarget 的注释。
+            刻意不放 tooltip：文件名是扫列表就要读到的东西，藏进悬停提示等于没有。
+          -->
+          <span v-if="nodeTarget(node)" class="node-target">{{ nodeTarget(node) }}</span>
           <!--
             后端 attempt 是 0 基下标（首个节点就是 0），直接显示会让人误读成
             「一次都没试过」。统一 formatRound 成「第 N 轮」，tooltip 里保留原始值方便对日志。
@@ -264,11 +294,36 @@ function summarizeVerify(v: VerifyResult | null): string {
   gap: 8px;
 }
 
+/**
+ * 节点作用对象（文件名 / 整仓），紧跟类型名。
+ * 等宽字体，方便与补丁面板、沙箱目录里的路径对照。
+ *
+ * 这里**刻意不挂 tooltip**（曾经挂过）：它是扫列表就要读到的信息，藏进悬停提示等于没有。
+ * 极长的文件名交给省略号即可 —— 完整路径在补丁面板里本来就能看到。
+ */
+.node-target {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 轮次与状态标签不参与压缩：为了给长文件名让路而把它们挤掉，比截断文件名更糟 */
+.node-head .attempt,
+.node-head :deep(.el-tag) {
+  flex: 0 0 auto;
+}
+
 .emoji {
   font-size: 16px;
 }
 
 .title {
+  flex: 0 0 auto;
   font-weight: 600;
 }
 

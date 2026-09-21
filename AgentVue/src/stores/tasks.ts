@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { approveGate as approveGateApi, approvePlan as approvePlanApi, applyWriteBack as applyWriteBackApi, cancelTask as cancelTaskApi, createTask, describeError, getTask, getTaskTrace, listTasks, preflightWriteBack as preflightWriteBackApi, rejectGate as rejectGateApi, rejectPlan as rejectPlanApi, retryTask as retryTaskApi } from '@/api/client'
+import { approveGate as approveGateApi, approvePlan as approvePlanApi, applyWriteBack as applyWriteBackApi, cancelTask as cancelTaskApi, createTask, describeError, getTask, getTaskTrace, listTasks, preflightWriteBack as preflightWriteBackApi, rejectGate as rejectGateApi, rejectPlan as rejectPlanApi, retryTask as retryTaskApi, runDemo } from '@/api/client'
 import { openTaskEvents } from '@/api/sse'
 import type { CreateTaskRequest, ProgressEvent, TaskDetail, TaskTrace, TaskView, WriteBackReport } from '@/api/types'
 import { canCancelStatus, canRetryStatus } from '@/utils/status'
@@ -662,6 +662,30 @@ export const useTasksStore = defineStore('tasks', () => {
     }
   }
 
+  /**
+   * 提交一个**演示样本**：只把样本 key 交给后端，工程路径由服务端从配置解析。
+   *
+   * 与 {@link submit} 的唯一区别是请求本身（走 `/api/demo/run`，任务带 demo 标记）——
+   * 提交之后的处理完全一致：刷新列表 + 切到新任务详情，用户立刻看到自己那条开始跑。
+   */
+  async function submitDemo(sampleKey: string): Promise<TaskView | null> {
+    submitting.value = true
+    submitError.value = null
+    try {
+      const created = await runDemo(sampleKey)
+      lastCreatedId.value = created.id
+      // 列表拉一次，再切到新建任务的详情（演示任务也会出现在列表里）
+      await refreshList()
+      await selectTask(created.id)
+      return created
+    } catch (e) {
+      submitError.value = describeError(e)
+      return null
+    } finally {
+      submitting.value = false
+    }
+  }
+
   function teardown(): void {
     if (closeCurrentEvents) {
       closeCurrentEvents()
@@ -978,6 +1002,7 @@ export const useTasksStore = defineStore('tasks', () => {
     selectTask,
     startCreate,
     submit,
+    submitDemo,
     approveCurrentPlan,
     rejectCurrentPlan,
     approveCurrentGate,

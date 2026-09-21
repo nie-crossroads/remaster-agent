@@ -29,6 +29,8 @@ import java.time.Instant;
  * @param cancelRequested 是否已被请求取消。与 {@code status} 并列而不合并，因为两者可以同时为
  *        「RUNNING + 已请求取消」—— 那正是「点完取消、当前节点还在跑」的真实状态。
  *        前端据它把按钮显示成「正在取消…」，否则点了取消页面毫无变化，看起来像没生效
+ * @param demo 是否为演示任务（登录后在工作台选本地可信样本触发）。前端据它在列表里显示「演示」角标，
+ *             以便和真实任务区分 —— 刻意不隐藏：用户跑完示例要能在列表里看到自己那一条
  */
 public record TaskView(
         long id,
@@ -42,7 +44,8 @@ public record TaskView(
         Instant createdAt,
         Instant updatedAt,
         MetricsView metrics,
-        Long runDurationMs
+        Long runDurationMs,
+        boolean demo
 ) {
 
     /**

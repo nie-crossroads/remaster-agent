@@ -53,6 +53,11 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
+    <!-- 演示模式登录：仅保护 /api/demo/**，其余端点保持原样（避免破坏双进程/评测 harness） -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
 
     <dependency>
       <groupId>org.flywaydb</groupId>

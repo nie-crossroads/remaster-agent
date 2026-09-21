@@ -41,7 +41,7 @@ import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 
 import type { DagNode } from '@/api/types'
-import { NODE_TYPE_EMOJI, NODE_TYPE_LABEL, formatRound } from '@/utils/status'
+import { NODE_TYPE_EMOJI, NODE_TYPE_LABEL, fileNameOf, formatRound, nodeFileFromKey } from '@/utils/status'
 
 interface Props {
   nodes: DagNode[]
@@ -113,12 +113,15 @@ const laidOut = computed(() => {
   })
 })
 
-/** 节点卡片上的副标题：带文件路径的节点显示文件名，否则不显示。 */
+/**
+ * 节点卡片上的副标题：带文件路径的节点显示文件名，否则不显示。
+ *
+ * 解析交给 `nodeFileFromKey`（节点时间线用的是同一把尺子）—— 卡片上一行只放一个文件名
+ * 是刻意的：整图要能一眼扫完，超出的部分由卡片的 `title` 兜底。
+ */
 function subtitleOf(node: DagNode): string | null {
-  const colon = node.nodeKey?.indexOf(':') ?? -1
-  if (colon < 0) return null
-  const filePath = node.nodeKey.slice(colon + 1)
-  return filePath.split(/[\\/]/).pop() ?? filePath
+  const filePath = nodeFileFromKey(node.nodeKey)
+  return filePath ? fileNameOf(filePath) : null
 }
 
 const flowNodes = computed<Node[]>(() =>

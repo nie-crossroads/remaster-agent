@@ -250,7 +250,7 @@ class TaskViewMapperTest {
                 durationMs);
         Instant now = Instant.now();
         return new MigrationTask(7L, "E:/demo", "src/main/java/Demo.java", 21,
-                TaskStatus.SUCCEEDED, new JsonCodec().write(metrics), null, false, now, now, null);
+                TaskStatus.SUCCEEDED, new JsonCodec().write(metrics), null, false, now, now, null, false);
     }
 
     private static DagNode rewriteNode(Long id, int attempt) {
@@ -271,6 +271,6 @@ class TaskViewMapperTest {
     private static MigrationTask task() {
         Instant now = Instant.now();
         return new MigrationTask(7L, "E:/demo", "src/main/java/Demo.java", 21,
-                TaskStatus.SUCCEEDED, null, null, false, now, now, null);
+                TaskStatus.SUCCEEDED, null, null, false, now, now, null, false);
     }
 }

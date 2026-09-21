@@ -135,6 +135,6 @@ class TaskControllerGateTest {
 
     private static MigrationTask task(TaskStatus status) {
         Instant now = Instant.now();
-        return new MigrationTask(TASK_ID, "/proj", "A.java", 21, status, null, null, false, now, now, null);
+        return new MigrationTask(TASK_ID, "/proj", "A.java", 21, status, null, null, false, now, now, null, false);
     }
 }

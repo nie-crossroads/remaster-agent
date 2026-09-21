@@ -126,9 +126,57 @@ export interface TaskView {
    * 也就是**不知道**，绝不能显示成「运行了 0 秒」。
    */
   runDurationMs?: number | null
+  /**
+   * 是否为演示任务（游客身份跑的本地可信样本）。
+   *
+   * 演示任务走与普通任务完全相同的编排与沙箱，只在「任务列表过滤」与「沙箱保留期更短」上被区别对待。
+   * 后端在 `migration_task.demo` 列存这个标记，详情/列表接口都带它，前端据此在列表项上贴「演示」标签。
+   */
+  demo?: boolean
 }
 
-/** VERIFY 节点的产出 —— 唯一的事实来源。 */
+/**
+ * 演示模式开关状态（免登录，落地页据此决定是否显示「运行示例工程」CTA、是否需要先登录）。
+ *
+ * 对应后端 `GET /api/demo/status` 的返回。
+ */
+/**
+ * 当前登录者的身份与角色（对应后端 `GET /api/auth/me`）。
+ *
+ * <p>`roles` 是角色判断的**唯一事实来源**：前端不自己推断谁是 root，只把服务端签发的角色
+ * 翻译成界面行为（目前只有一件事：ROOT → 工作台任务列表显示全量）。
+ * 这样「界面以为自己是 root」和「安全链认为你是 root」不可能出现两套说法 —— 它们读的是同一份角色。
+ */
+export interface CurrentUser {
+  /** 登录名。 */
+  username: string
+  /** 角色名，**不带** `ROLE_` 前缀（服务端已剥掉）：`DEMO` / `ROOT`。 */
+  roles: string[]
+}
+
+export interface DemoStatus {
+  /** 演示端点是否开启（false 时前端隐藏所有演示入口）。 */
+  enabled: boolean
+  /** 运行示例是否需要登录共享 demo 账号。本项目恒为 true（决策点 5：演示需登录）。 */
+  requiresLogin: boolean
+}
+
+/**
+ * 一个可选的演示样本（对应后端 `GET /api/demo/samples` 的一项）。
+ *
+ * `projectRoot` 是**服务器本机绝对路径**，只有服务端知道真实值 —— 前端拿到它只是为了
+ * 在表单里只读展示，不从客户端反向提交（提交时只给 `key`，路径仍由服务端解析）。
+ */
+export interface DemoSample {
+  /** 样本标识，也是提交给 `/api/demo/run` 的唯一入参。 */
+  key: string
+  /** 展示名，成为任务名的一部分（列表里据此区分跑的是哪个剧本）。 */
+  name: string
+  projectRoot: string
+  /** null = 整仓升级（只抬编译级别，不改代码）。 */
+  entryFile: string | null
+  targetJdk: number
+}
 export interface VerifyResult {
   compiled: boolean
   exitCode: number

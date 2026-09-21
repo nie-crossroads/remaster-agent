@@ -4,17 +4,45 @@
  *
  * 列表只显示 task 概要（id/状态/projectRoot/当前节点/量化指标），
  * 真实细节由右侧 TaskDetail 区域承担。这是显式分工，避免列表渲染整图 Diff 等大数据。
+ *
+ * 另外有一层展示过滤：演示账号只看得到演示任务，管理员（root）看全部，理由见下方 `visibleTasks`。
  */
 import { computed, onMounted } from 'vue'
 
 import type { TaskStatus, TaskView } from '@/api/types'
 import { TASK_STATUS_LABEL, TASK_STATUS_TAG, formatCost, formatDurationPair } from '@/utils/status'
 
+import { useAuthStore } from '@/stores/auth'
 import { useTasksStore } from '@/stores/tasks'
 
 const tasks = useTasksStore()
+const auth = useAuthStore()
 
 const statusFilter = computed<Set<TaskStatus>>(() => new Set())
+
+/**
+ * 列表实际渲染的任务 —— 由**服务端签发的角色**决定，而不是由「登没登录」决定。
+ *
+ * <p>三档：
+ * <ul>
+ *   <li><b>演示账号（DEMO）</b>：只看演示任务。这个工作台对访客开放的入口就是「跑示例工程」，
+ *       访客该看到的只有示例跑出来的任务；这台机器上真实跑过的迁移记录是开发者自己的账，
+ *       混进访客视线既解释不清、也不该给看。</li>
+ *   <li><b>管理员（ROOT）</b>：全部任务。root 就是这台机器的主人，没理由把自己的账藏起来 ——
+ *       这正是加这个账号的意义所在。</li>
+ *   <li><b>未登录</b>：工作台本来进不来（路由守卫挡着），这里只是兜底，不额外隐藏什么。</li>
+ * </ul>
+ *
+ * <p>判据用 `auth.isRoot`（即 `/api/auth/me` 返回的角色），而不是 `username === 'root'`：
+ * 用户名是可配置的，而且把权限判据复制到前端，就成了和安全链各说各话的两套标准。
+ *
+ * <p>过滤放在视图层而不是 store 或后端：它是「这一屏给谁看」的展示策略，不是数据权限 ——
+ * 接口并不因此变窄（`GET /api/tasks` 照旧返回全量）。
+ */
+const visibleTasks = computed(() => {
+  if (!auth.isAuthenticated || auth.isRoot) return tasks.sortedList
+  return tasks.sortedList.filter((task) => task.demo === true)
+})
 
 onMounted(() => {
   if (tasks.list.length === 0) {
@@ -75,14 +103,14 @@ function targetName(task: TaskView): string {
       {{ tasks.listError }}
     </div>
 
-    <div v-else-if="tasks.sortedList.length === 0 && !tasks.listLoading" class="empty">
+    <div v-else-if="visibleTasks.length === 0 && !tasks.listLoading" class="empty">
       <p>暂无任务</p>
-      <p class="hint">在右侧填表提交，列表会自动刷新</p>
+      <p class="hint">点右上角「新建任务」挑一个示例工程提交，任务会出现在这里</p>
     </div>
 
     <ul v-else>
       <li
-        v-for="task in tasks.sortedList"
+        v-for="task in visibleTasks"
         :key="task.id"
         :class="{ active: isSelected(task.id) }"
         @click="tasks.selectTask(task.id)"
@@ -93,6 +121,7 @@ function targetName(task: TaskView): string {
           <span class="name" :title="task.name ?? undefined">
             {{ task.name || '未命名' }}
           </span>
+          <el-tag v-if="task.demo" type="warning" size="small" effect="plain">演示</el-tag>
           <el-tag :type="TASK_STATUS_TAG[task.status]" size="small">
             {{ TASK_STATUS_LABEL[task.status] }}
           </el-tag>

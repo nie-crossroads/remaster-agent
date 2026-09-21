@@ -62,6 +62,39 @@ remaster:
     workspace-cleanup-enabled: ${REMASTER_WORKSPACE_CLEANUP_ENABLED:true}
     workspace-retention: ${REMASTER_WORKSPACE_RETENTION:24h}
 
+  # 演示模式（访客跑服务器本地可信样本）。默认关闭；开放对外演示时开启并配置样本路径。
+  # 详见 docs/DEMO_LANDING_ARCH_PLAN.md。样本路径绝不来自客户端，只从配置读取。
+  demo:
+    enabled: ${REMASTER_DEMO_ENABLED:false}
+    # 演示样本：一个样本 = 一个可直接运行的本地可信工程。
+    # 客户端只能选 key（前端下拉），路径永远由服务端从下面这份配置解析 —— 这是演示端点的安全边界。
+    # 默认指向本仓 examples/ 下的三个示例；换机器部署时覆盖对应环境变量即可，不必改代码。
+    samples:
+      # 剧本一：能顺利迁移成功（编译过 / 单测过），用来展示「正常长什么样」
+      - key: legacy-demo
+        name: 示例一 · 报表服务（可成功迁移-预计执行2~3分钟）
+        project-root: ${REMASTER_DEMO_ROOT_LEGACY_DEMO:E:/AITools/WorkBuddy/workspace/langchain-agent-java/examples/legacy-demo}
+        entry-file: src/main/java/com/example/legacy/LegacySalesReport.java
+      # 剧本二：同一类问题但写法更复杂，用来展示模型在更大面向上能改到什么程度
+      - key: legacy-demo-complex
+        name: 示例二 · 客户订单服务（复杂写法）
+        project-root: ${REMASTER_DEMO_ROOT_LEGACY_DEMO_COMPLEX:E:/AITools/WorkBuddy/workspace/langchain-agent-java/examples/legacy-demo-complex}
+        entry-file: src/main/java/com/example/legacy/LegacyCustomerOrders.java
+      # 剧本三：构建本身不可能通过，用来展示「失败时护栏会不会在有限轮次内停下」
+      - key: legacy-unfixable
+        name: 示例三 · 库存台账（不可修复，演示回退上限）
+        project-root: ${REMASTER_DEMO_ROOT_LEGACY_UNFIXABLE:E:/AITools/WorkBuddy/workspace/langchain-agent-java/examples/legacy-unfixable}
+        entry-file: src/main/java/com/example/unfixable/LegacyStockLedger.java
+    concurrency: ${REMASTER_DEMO_CONCURRENCY:2}
+    # 演示登录共享凭据（HTTP Basic）。仅用于演示网关，不建用户表/多租户。
+    # 生产对外演示务必用环境变量覆盖，且凭据不要和真实系统复用。
+    username: ${REMASTER_DEMO_USERNAME:demo}
+    password: ${REMASTER_DEMO_PASSWORD:remaster-demo}
+    # 全权限账号（角色 DEMO + ROOT）：同一个界面，但工作台的任务列表显示全部历史任务。
+    # 生产对外演示务必覆盖；用户名不要和上面的 demo 账号相同（同名时系统按最小权限只保留 demo）。
+    root-username: ${REMASTER_DEMO_ROOT_USERNAME:root}
+    root-password: ${REMASTER_DEMO_ROOT_PASSWORD:remaster-root}
+
   # 代码 RAG（阶段 2 理解层）。API 进程不执行检索，但配置需齐备（见下 sandbox 的同款说明）。
   rag:
     enabled: ${REMASTER_RAG_ENABLED:true}

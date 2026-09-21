@@ -156,6 +156,17 @@ function formatRange(run: TraceRunView): string {
       </div>
 
       <!--
+        给「节点条与模型调用条几乎等宽」一个固定解释。
+        它看起来就像进度条画重了，其实那是这一层的真实结构 —— 与其每次都被当成 bug 问一遍，
+        不如把答案钉在图下面（实测任务 64：node: plan 11.7s / llm: PLAN 11.2s）。
+      -->
+      <p class="trace-note">
+        节点条与它的子操作条是<b>嵌套</b>关系：<code>node:*</code> 包住自己那一跳唯一的子操作
+        （规划与重写下面是模型调用，验证下面是沙箱 <code>mvn</code>），所以两者几乎等宽 ——
+        差的那一点是本次操作的准备与收尾，通常在毫秒级。要读的是它占总耗时的比例。
+      </p>
+
+      <!--
         一次执行一张图。滚动放在这个容器上（而不是每张图各自滚动）：
         多组时各自出现滚动条会让「哪次是哪次」的关系更难读。
       -->
@@ -211,6 +222,24 @@ function formatRange(run: TraceRunView): string {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+/**
+ * 一句固定解释：节点条与子操作条几乎等宽是这一层的真实结构，不是进度条算错。
+ * 用常规说明色而不是警示色 —— 它是「怎么读这张图」，不是「这里有问题」。
+ */
+.trace-note {
+  margin: 0 0 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.trace-note code {
+  background: var(--bg-page);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-family: 'SFMono-Regular', Consolas, monospace;
 }
 
 .legend-dot {

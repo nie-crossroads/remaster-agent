@@ -80,18 +80,19 @@ public class JdbcTaskStore implements TaskStore {
     // ------------------------------------------------------------------
 
     @Override
-    public long createTask(String projectRoot, String entryFile, int targetJdk, String name) {
+    public long createTask(String projectRoot, String entryFile, int targetJdk, String name, boolean demo) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(connection -> {
             PreparedStatement ps = connection.prepareStatement("""
-                    INSERT INTO migration_task (project_root, entry_file, target_jdk, name, status)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO migration_task (project_root, entry_file, target_jdk, name, status, demo)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """, ID_COLUMN);
             ps.setString(1, projectRoot);
             ps.setString(2, entryFile);
             ps.setInt(3, targetJdk);
             ps.setString(4, name);
             ps.setString(5, TaskStatus.PENDING.name());
+            ps.setBoolean(6, demo);
             return ps;
         }, keyHolder);
         return requireKey(keyHolder);
@@ -101,7 +102,7 @@ public class JdbcTaskStore implements TaskStore {
     public Optional<MigrationTask> findTask(long taskId) {
         List<MigrationTask> rows = jdbc.query("""
                 SELECT id, project_root, entry_file, target_jdk, name, status, metrics, fail_reason,
-                       cancel_requested, created_at, updated_at
+                       cancel_requested, created_at, updated_at, demo
                   FROM migration_task WHERE id = ?
                 """, TASK_MAPPER, taskId);
         return rows.stream().findFirst();
@@ -133,13 +134,25 @@ public class JdbcTaskStore implements TaskStore {
     public List<MigrationTask> findRecentTasks(int limit) {
         // 次级排序键用 id 而不是 updated_at：同一秒内创建的任务在时间上无法区分，
         // 加上 id 才能保证顺序稳定（否则列表会在两次请求之间莫名换位）
+        // 演示任务（demo=true）不过滤：用户在工作台选样本跑完，要能在列表里看到自己那一条。
+        // 它靠 demo 标记在前端显示「演示」角标来区分，而不是靠隐藏。
         return jdbc.query("""
                 SELECT id, project_root, entry_file, target_jdk, name, status, metrics, fail_reason,
-                       cancel_requested, created_at, updated_at
+                       cancel_requested, created_at, updated_at, demo
                   FROM migration_task
                  ORDER BY created_at DESC, id DESC
                  LIMIT ?
                 """, TASK_MAPPER, limit);
+    }
+
+    @Override
+    public int countActiveDemoTasks() {
+        Integer count = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM migration_task
+                 WHERE demo = TRUE
+                   AND status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+                """, Integer.class);
+        return count == null ? 0 : count;
     }
 
     // ------------------------------------------------------------------
@@ -602,7 +615,8 @@ public class JdbcTaskStore implements TaskStore {
             rs.getBoolean("cancel_requested"),
             toInstant(rs.getTimestamp("created_at")),
             toInstant(rs.getTimestamp("updated_at")),
-            rs.getString("name"));
+            rs.getString("name"),
+            rs.getBoolean("demo"));
 
     private static final RowMapper<DagNode> NODE_MAPPER = (rs, rowNum) -> new DagNode(
             rs.getLong("id"),

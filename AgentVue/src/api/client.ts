@@ -1,5 +1,5 @@
 import axios, { AxiosError } from 'axios'
-import type { CreateTaskRequest, TaskDetail, TaskTrace, TaskView, WriteBackReport } from './types'
+import type { CreateTaskRequest, CurrentUser, DemoSample, DemoStatus, TaskDetail, TaskTrace, TaskView, WriteBackReport } from './types'
 
 /**
  * REST 客户端。
@@ -14,6 +14,9 @@ const http = axios.create({
   baseURL: '/api',
   timeout: 15_000,
 })
+
+/** 内部共用的 axios 实例。拦截器（见 ./interceptors）挂在这里。 */
+export { http }
 
 /** 任务列表（按后端返回顺序，通常是最近更新的在前或按 id 倒序）。 */
 export async function listTasks(): Promise<TaskView[]> {
@@ -120,6 +123,69 @@ export async function retryTask(id: number): Promise<TaskView> {
  */
 export async function getTaskTrace(id: number): Promise<TaskTrace> {
   const { data } = await http.get<TaskTrace>(`/tasks/${id}/trace`)
+  return data
+}
+
+/**
+ * 当前登录者的身份与角色（需登录）。
+ *
+ * <h2>它同时干两件事</h2>
+ * <ol>
+ *   <li><b>把登录校验提前</b>：Basic 鉴权是无状态的，服务端不留 session，所以「刚才填的账号密码对不对」
+ *       只有问服务端才知道。以前是等用户点「运行示例」时撞 401 才暴露 —— 这个端点让登录页
+ *       当场就能给出「账号或密码错误」。</li>
+ *   <li><b>把角色交给前端</b>：工作台据此决定任务列表的可见范围（ROOT 全量 / DEMO 只看演示任务），
+ *       前端不需要、也不应该自己猜谁是 root。</li>
+ * </ol>
+ *
+ * <p>凭据不对会返回 401 —— 拦截器（见 ./interceptors）会带上 auth store 里存的 Basic 头，
+ * 所以这个 401 是「凭据错」而不是「没带凭据」。
+ */
+export async function getCurrentUser(): Promise<CurrentUser> {
+  const { data } = await http.get<CurrentUser>('/auth/me')
+  return data
+}
+
+/**
+ * 演示模式开关状态（免登录）。
+ *
+ * 落地页用它判断：演示是否开启、是否需要先登录。后端 `/api/demo/status` 在 Security 链里被
+ * 显式 `permitAll`，所以**不**带 Basic 头也能访问 —— 反过来意味着这里拿不到 401，
+ * 登录态与否不影响这一次的探测。
+ */
+export async function getDemoStatus(): Promise<DemoStatus> {
+  const { data } = await http.get<DemoStatus>('/demo/status')
+  return data
+}
+
+/**
+ * 拉取可选的演示样本列表（需登录）。
+ *
+ * 工作台的「新建任务」表单据此渲染下拉框。路径是服务器本机绝对路径、随部署不同，
+ * 只有服务端知道真实值 —— 前端既不硬编码，也不反向提交。
+ */
+export async function getDemoSamples(): Promise<DemoSample[]> {
+  const { data } = await http.get<DemoSample[]>('/demo/samples')
+  return data
+}
+
+/**
+ * 以演示角色运行指定的本地可信样本，返回 202 + 任务概要。
+ *
+ * <h2>为什么只传 key</h2>
+ * 客户端唯一可控的输入是样本 key；`projectRoot`/`entryFile` 全由服务端从配置解析。
+ * 传路径的接口等于把「跑哪个工程」交给调用方，那正是演示端点要避免的事。
+ *
+ * <h2>鉴权</h2>
+ * 后端 `/api/demo/run` 在 Security 链里是 `authenticated()`，必须由 auth store 的 axios
+ * 拦截器挂上 `Authorization: Basic ...` 头才会放行；没登录（拦截器不挂头）会收到 401。
+ *
+ * <h2>拿到概要后怎么走</h2>
+ * 与 `POST /api/tasks` 同源：请求只是「接受了任务」，调用方应随即跳到 `/tasks/{id}`
+ * 复用既有详情视图（同样的 SSE 进度与 DAG 渲染）。所以这里直接返回 `TaskView`。
+ */
+export async function runDemo(sampleKey: string): Promise<TaskView> {
+  const { data } = await http.post<TaskView>('/demo/run', { sample: sampleKey })
   return data
 }
 

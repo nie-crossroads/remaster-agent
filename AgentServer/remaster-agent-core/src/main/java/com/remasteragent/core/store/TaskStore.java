@@ -37,8 +37,30 @@ public interface TaskStore {
     // 任务
     // ------------------------------------------------------------------
 
-    /** 创建任务，返回自增 id。name 为任务名（可选，仅展示用，可为 null）。 */
-    long createTask(String projectRoot, String entryFile, int targetJdk, String name);
+    /**
+     * 创建任务，返回自增 id。name 为任务名（可选，仅展示用，可为 null）。
+     *
+     * @param demo true 标记该任务为演示任务（游客触发、跑服务器本地可信样本）。
+     *             演示任务从真实用户列表过滤，并用更短保留期清理沙箱。
+     */
+    long createTask(String projectRoot, String entryFile, int targetJdk, String name, boolean demo);
+
+    /**
+     * 创建普通（非演示）任务。等价于 {@link #createTask(String, String, int, String, boolean)}
+     * 传入 {@code demo=false}，保留旧调用方的兼容性。
+     */
+    default long createTask(String projectRoot, String entryFile, int targetJdk, String name) {
+        return createTask(projectRoot, entryFile, targetJdk, name, false);
+    }
+
+    /**
+     * 当前正在运行（非终态）的演示任务数 —— 演示并发护栏的输入。
+     *
+     * <p>演示端点用它对「同时进行的演示迁移」做限流：{@code mvn test} 很重，
+     * 一个面试官的跑批不应饿死其他人。只数 {@code demo=true} 且状态未到
+     * SUCCEEDED/FAILED/CANCELLED 的任务。
+     */
+    int countActiveDemoTasks();
 
     Optional<MigrationTask> findTask(long taskId);
 

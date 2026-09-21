@@ -33,6 +33,9 @@ import java.time.Instant;
  * @param createdAt   创建时间
  * @param updatedAt   最后更新时间
  * @param name        任务名（建单页手动输入，可选；评测任务取用例 id）。仅用于展示区分，不参与编排
+ * @param demo        是否为演示任务（游客触发、跑服务器本地可信样本）。true 时从真实用户任务列表过滤，
+ *                    并用更短保留期清理沙箱（见 {@code WorkspaceCleaner}）。与「普通用户任务」是两条创建通道，
+ *                    但共用同一套编排与沙箱，所以语义上只是一个布尔标记，不是独立的任务类型。
  */
 public record MigrationTask(
         Long id,
@@ -45,7 +48,8 @@ public record MigrationTask(
         boolean cancelRequested,
         Instant createdAt,
         Instant updatedAt,
-        String name
+        String name,
+        boolean demo
 ) {
     public static final int DEFAULT_TARGET_JDK = 21;
 }

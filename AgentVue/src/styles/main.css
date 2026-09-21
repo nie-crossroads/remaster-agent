@@ -1,7 +1,8 @@
 /*
  * 全局样式。
  *
- * ElementPlus 提供完整 design token；这里只补三件它没默认给的：
+ * ElementPlus 提供完整 design token；这里只补四件它没默认给的：
+ *   - 顶栏高度变量 --topnav-h（全屏视图要靠它算「还剩下多少高度」）
  *   - 让 .app-shell 用 grid 真正成为「左列右侧」两栏
  *   - 给 SSE 状态指示灯统一颜色（与 status 字典里那个 tag 颜色保持一致）
  *   - 把 Monaco diff 编辑器的背景换成深色（默认跟系统走，在亮主题页面里会很突兀）
@@ -18,6 +19,16 @@
   --color-warning: #e6a23c;
   --color-danger: #f56c6c;
   --color-info: #909399;
+
+  /*
+   * 顶部导航（App.vue 的 .app-topnav）的高度。
+   *
+   * 抽成变量是因为它必须与「整屏高度减去多少」对上：全屏视图（工作台的两栏布局、
+   * 登录页的居中容器）要 `calc(100vh - var(--topnav-h))` 才能刚好占满剩余视野。
+   * 两边各写一个 52 的时候没有任何报错，只是页面底部会永远多出 52px 的溢出 ——
+   * 表现成浏览器最右侧那条本不该存在的竖向滚动条。
+   */
+  --topnav-h: 52px;
 
   color-scheme: light;
 }
@@ -42,10 +53,28 @@ body {
   line-height: 1.5;
 }
 
+/*
+ * 工作台的两栏骨架。
+ *
+ * 它填满**父容器**剩下的高度（父级是工作台视图那根 flex 列），而不是直接量视口：
+ * 页面上除了全局导航，工作台自己还有一条顶栏，于是任何 `100vh` 的写法都会比视口高出
+ * 「导航 + 工作台顶栏」这两条栏的高度 —— 页面底部恒有一小段溢出，浏览器最右侧就挂出
+ * 一条本不该存在的竖向滚动条，滚到底只看得到空白。
+ *
+ * 交给父级分配高度的好处是不必知道顶栏到底多少像素（它随内容变），
+ * 少一处「改个内边距就悄悄多出几像素溢出」的隐患。
+ */
 .app-shell {
   display: grid;
   grid-template-columns: 360px 1fr;
-  height: 100vh;
+  flex: 1 1 auto;
+
+  /*
+   * min-height: 0 不能省。grid / flex 子项的默认最小尺寸是 auto —— 内容比容器高时
+   * 它会顶穿父容器，于是内层 main / aside 的 overflow-y: auto 永远轮不到滚动，
+   * 溢出的部分跑到整个页面上，正是上面说的那条滚动条。
+   */
+  min-height: 0;
 }
 
 .app-shell > aside {
@@ -69,6 +98,8 @@ body {
   position: sticky;
   top: 0;
   z-index: 10;
+  /* 工作台视图是 flex 列：顶栏按自身高度占位、不参与伸缩，剩余高度全给下面的分栏 */
+  flex: 0 0 auto;
 }
 
 .app-header h1 {
