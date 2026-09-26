@@ -85,6 +85,17 @@ public class LocalProcessSandboxExecutor implements SandboxExecutor {
         builder.redirectError(ProcessBuilder.Redirect.to(stderrLog.toFile()));
 
         Map<String, String> environment = builder.environment();
+        // worker 进程可能被面板以任意方式拉起，未必继承到 JAVA_HOME；而沙箱里的 mvn 子进程
+        // 依赖它定位 JDK。若运行环境缺失，用当前 worker 自身 JVM 的 java.home 兜底注入，
+        // 彻底消除「手动能跑、页面却报 JAVA_HOME 未定义」这类因启动环境差异导致的诡异失败。
+        String javaHome = environment.get("JAVA_HOME");
+        if (javaHome == null || javaHome.isBlank()) {
+            String fallback = System.getProperty("java.home");
+            if (fallback != null && !fallback.isBlank()) {
+                environment.put("JAVA_HOME", fallback);
+                log.info("沙箱环境缺少 JAVA_HOME，已用 worker 自身 JDK 兜底注入: {}", fallback);
+            }
+        }
         environment.putAll(jvmOverrides(request.memoryLimitMb()));
         // 外部注入的 JAVA_TOOL_OPTIONS 可能带进调试端口、代理等意外配置，沙箱里一律清掉
         environment.remove("JAVA_TOOL_OPTIONS");

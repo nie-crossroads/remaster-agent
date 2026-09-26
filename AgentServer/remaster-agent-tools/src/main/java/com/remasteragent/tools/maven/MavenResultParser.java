@@ -267,7 +267,28 @@ public final class MavenResultParser {
             }
         }
 
+        String result = sb.toString();
+        // 兜底：上面没能提取出任何可定位信息（典型是构建在 javac 之前就崩了，
+        // 例如依赖下载失败、JAVA_HOME 缺失导致 mvn 根本起不来），此时把原始控制台尾部
+        // 附上，避免页面只显示「编译失败（无摘录）」而完全看不到真因，逼着每回都上服务器翻日志。
+        if (result.isBlank() && console != null && !console.isBlank()) {
+            sb.append("原始构建输出尾部（未能提取结构化错误，附此定位根因）:\n");
+            for (String line : tailLines(console, 40)) {
+                sb.append("  ").append(line).append('\n');
+            }
+        }
         return sb.toString();
+    }
+
+    /** 取控制台最后 n 行：BUILD FAILURE 汇总、Could not resolve、JAVA_HOME 报错等都落在尾部。 */
+    private static List<String> tailLines(String text, int n) {
+        String[] lines = text.split("\\R", -1);
+        int start = Math.max(0, lines.length - n);
+        List<String> tail = new ArrayList<>();
+        for (int i = start; i < lines.length; i++) {
+            tail.add(lines[i]);
+        }
+        return tail;
     }
 
     /** 兼容旧签名（不做路径相对化）。 */

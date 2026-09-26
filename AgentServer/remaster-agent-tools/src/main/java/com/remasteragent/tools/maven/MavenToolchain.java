@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -57,18 +58,32 @@ public record MavenToolchain(Path executable, Path settingsXml, Path localReposi
     }
 
     /**
-     * 定位可执行文件。Windows 上优先 {@code mvn.cmd}，其次 {@code mvn.bat}；
-     * 类 Unix 上用 {@code mvn}。
+     * 定位可执行文件。按操作系统选择启动器：Windows 用 {@code mvn.cmd}/{@code mvn.bat}，
+     * 类 Unix（Linux/macOS）用 {@code mvn} shell 脚本。
+     *
+     * <p>早期实现无条件优先 {@code mvn.cmd}，导致 Linux 服务器上把 .cmd 当 shell 脚本执行、
+     * 第一行 {@code @REM} 直接语法崩溃（"syntax error near unexpected token"）。
+     * 现按 OS 区分，Linux 永远选 {@code mvn}。</p>
      */
-    private static Path resolveExecutable(String mavenHome) {
+    public static Path resolveExecutable(String mavenHome) {
         Path bin = Paths.get(mavenHome, "bin");
-        for (String candidate : List.of("mvn.cmd", "mvn.bat", "mvn")) {
+        List<String> candidates = isWindows()
+                ? List.of("mvn.cmd", "mvn.bat")
+                : List.of("mvn");
+        for (String candidate : candidates) {
             Path path = bin.resolve(candidate);
             if (Files.isRegularFile(path)) {
                 return path.toAbsolutePath().normalize();
             }
         }
-        throw new IllegalStateException("在 " + bin + " 下找不到 mvn 可执行文件");
+        throw new IllegalStateException("在 " + bin + " 下找不到 mvn 可执行文件"
+                + (isWindows() ? "（应为 mvn.cmd / mvn.bat）"
+                        : "（应为 mvn shell 脚本；Linux 上不能用 mvn.cmd）"));
+    }
+
+    /** 是否 Windows。用于选择 Maven 启动器（mvn.cmd vs mvn）。 */
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
     }
 
     private static String require(Map<String, String> env, String key) {

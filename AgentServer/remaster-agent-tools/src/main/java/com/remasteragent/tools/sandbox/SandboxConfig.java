@@ -33,7 +33,7 @@ public class SandboxConfig {
         }
 
         MavenToolchain toolchain = new MavenToolchain(
-                Paths.get(properties.mavenHome(), "bin", "mvn.cmd").toAbsolutePath().normalize(),
+                MavenToolchain.resolveExecutable(properties.mavenHome()),
                 Paths.get(properties.mavenSettings()).toAbsolutePath().normalize(),
                 Paths.get(properties.mavenLocalRepo()).toAbsolutePath().normalize());
 
