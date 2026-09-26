@@ -53,6 +53,18 @@ spring:
 remaster:
   core:
     max-rewrite-attempts: 2
+    # 人在回路的两个开关（见 worker 的同名项）。**内嵌模式下必须在这里也写一遍** ——
+    # 跑 web jar + worker.embedded=true 时 worker 的 application.yml 不在 classpath 上，
+    # 只配在 worker 那边的话这边没有占位符可解析、字段是 null，开关恒等于 false。
+    # 现象是「.env 里明明写了 =true，任务却不停」，且启动日志一个字都不提（实测踩过）。
+    # true = PLAN 成功后把任务挂到 WAITING_HUMAN，等人在评审界面批准再继续（任务级，一次性）。
+    require-plan-approval: ${REMASTER_REQUIRE_PLAN_APPROVAL:false}
+    # true = 每个文件改写后插一道 GATE 再验证，链条变成 REWRITE → GATE → VERIFY（节点级，每文件一道）。
+    require-rewrite-approval: ${REMASTER_REQUIRE_REWRITE_APPROVAL:false}
+    # 门禁等待上限。0 = 永不超时（默认，门禁挂起的语义就是「等人」）；配了就是「没人管的任务
+    # 不会永远占着一行 PENDING」。超时【判失败】而不是自动放行 —— 放行等于让人在回路悄悄失效，
+    # 而失败会留下明确原因。支持 2h / 30m / 7d / PT24H。
+    gate-timeout: ${REMASTER_GATE_TIMEOUT:0}
     # 见 worker 的同名项。API 进程自身不跑沙箱（除非 worker.embedded=true 内嵌了 Worker），
     # 但配置需齐备 —— 内嵌模式下这里就是实际生效的值，且必须与 Worker 指向同一处。
     # 必须是绝对路径（相对路径会随进程工作目录漂移）；部署时用 REMASTER_WORKSPACE_ROOT 覆盖。
@@ -70,19 +82,22 @@ remaster:
     # 客户端只能选 key（前端下拉），路径永远由服务端从下面这份配置解析 —— 这是演示端点的安全边界。
     # 默认指向本仓 examples/ 下的三个示例；换机器部署时覆盖对应环境变量即可，不必改代码。
     samples:
-      # 剧本一：能顺利迁移成功（编译过 / 单测过），用来展示「正常长什么样」
+      # 剧本一：小工程，三个文件各改写一轮就通过 —— 用来展示一次「正常迁移」的完整形状
       - key: legacy-demo
-        name: 示例一 · 报表服务（可成功迁移-预计执行2~3分钟）
+        name: 示例一 · 销售报表（简单工程，3 个文件；约 3~15 分钟）
         project-root: ${REMASTER_DEMO_ROOT_LEGACY_DEMO:E:/AITools/WorkBuddy/workspace/langchain-agent-java/examples/legacy-demo}
         entry-file: src/main/java/com/example/legacy/LegacySalesReport.java
-      # 剧本二：同一类问题但写法更复杂，用来展示模型在更大面向上能改到什么程度
-      - key: legacy-demo-complex
-        name: 示例二 · 客户订单服务（复杂写法）
-        project-root: ${REMASTER_DEMO_ROOT_LEGACY_DEMO_COMPLEX:E:/AITools/WorkBuddy/workspace/langchain-agent-java/examples/legacy-demo-complex}
-        entry-file: src/main/java/com/example/legacy/LegacyCustomerOrders.java
-      # 剧本三：构建本身不可能通过，用来展示「失败时护栏会不会在有限轮次内停下」
+      # 剧本二：真实工程（Spring Boot 2.7 + Java 8，125 个源文件、43 个用 javax）。
+      # 整仓升级：父 POM 升 3.x → 注入 jakarta 依赖 → 逐文件改写 → 整仓 VERIFY。
+      # 耗时长是特性不是缺陷：它展示的是「几十个文件、多类改动一次收敛」。
+      - key: blog-service
+        name: 示例二 · 博客服务（真实工程整仓升级，耗时最长）
+        project-root: ${REMASTER_DEMO_ROOT_BLOG_SERVICE:E:/AITools/WorkBuddy/workspace/langchain-agent-java/examples/blog-service}
+        entry-file: src/main/java/com/blog/BlogServiceApplication.java
+      # 剧本三：三个文件都能改写成功，但测试源码引用了已被删除的类 —— 失败点不在改写范围里。
+      # 用来展示护栏：跑满回退上限后如实判失败，而不是无限重试烧预算。
       - key: legacy-unfixable
-        name: 示例三 · 库存台账（不可修复，演示回退上限）
+        name: 示例三 · 库存台账（3 个文件都能改，但构建必然失败；约 10~20 分钟）
         project-root: ${REMASTER_DEMO_ROOT_LEGACY_UNFIXABLE:E:/AITools/WorkBuddy/workspace/langchain-agent-java/examples/legacy-unfixable}
         entry-file: src/main/java/com/example/unfixable/LegacyStockLedger.java
     concurrency: ${REMASTER_DEMO_CONCURRENCY:2}

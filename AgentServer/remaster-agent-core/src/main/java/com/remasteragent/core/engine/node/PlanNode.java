@@ -41,6 +41,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * PLAN 节点：看一眼整个工程，决定要迁移哪些文件，并把决定翻译成 DAG 节点。
@@ -198,31 +200,41 @@ public class PlanNode implements NodeExecutor {
             log.info("规划未列出任何文件，兜底为入口文件: {}", context.task().entryFile());
         }
 
-        // 确定性安全网：模型可能漏掉「含 JDK 已移除 import」的文件（如老 SOAP handler、@Resource 服务类）。
-        // 这些文件不修整个工程就编不过，必须由规则强制补进清单，而不是听任模型判断。
-        // 入口文件若命中移除风险但模型没选，也会在这里被补回来。
-        List<String> merged = mergeRiskFiles(targets, removalRisks);
-
-        // 安全网第二层：javax→jakarta 迁移文件（javax.validation / javax.servlet / javax.persistence 等）。
-        // 它们不是「JDK 已移除包」，JdkRemovalScanner 扫不到，只落在 JakartaArtifactCatalog 里；
-        // 但漏改同样让整仓编译失败（实测博客工程：模型只挑了 33 个文件，9 个 javax.validation 文件漏网
-        // → 整仓 VERIFY 编译失败）。这里用统一的 LegacyImportDetector 再兜一遍，
-        // 保证「该改哪些文件」与「改写后算不算改完」是同一把尺子。
-        List<String> legacyFiles = scanLegacyImportFiles(context.workspace());
-        for (String file : legacyFiles) {
-            if (!merged.contains(file)) {
-                merged.add(file);
-            }
+        // 模型有概率「把文件列入迁移清单、却没给理由」（实测博客工程 #79：24 个文件里 16 个 rationale 为空）。
+        // 评审界面若直接显示空白，面试官会以为流程卡死、也不敢批准。
+        // 兜底：用确定性安全网的三把尺子（JDK 已移除 import / javax→jakarta / SB2→3 破坏性 API）
+        // 给<b>每一个</b>理由为空的文件补一句能解释的原因；三把尺子都解释不了的，也给一句诚实的元描述。
+        // 这把尺子的口径与下方「强制补入清单」的三种安全网完全一致，只是用途从「决定要不要改」
+        // 扩展到「解释为什么改」。下面的 removalFlagsNorm / legacySet / breakingSet 就是给
+        // effectivePlan 用的归一化查表结构（统一小写 + 斜杠，避免大小写/分隔符对不上）。
+        Map<String, List<String>> removalFlagsNorm = new LinkedHashMap<>();
+        if (removalRisks != null) {
+            removalRisks.byFile().forEach((k, v) -> {
+                List<String> flags = v.stream().map(JdkRemovalScanner.RemovalRisk::humanFlag).toList();
+                removalFlagsNorm.putIfAbsent(normalizePath(k).toLowerCase(), flags);
+            });
         }
 
-        // 安全网第三层：命中「Spring Boot 2→3 破坏性 API」的文件。
-        // 前两层都只量命名空间，于是一个 javax import 都没有、却用了 Spring 6 已换底层实现的 API 的
-        // 文件会完全隐身 —— 实测博客工程 RestTemplateConfig.java 就是这样：用了
-        // HttpComponentsClientHttpRequestFactory，Spring 6 起它只接受 HttpClient 5，
-        // 文件从头到尾没被任何一层选中，最后整仓 VERIFY 卡死在它一个文件上。
-        // 注意这里只做「选文件」：命中的文件不一定都要改，具体怎么改由改写节点的提示告知模型。
+        // 安全网第一层：JDK 已移除的 import（javax.xml.ws、javax.annotation…）
+        List<String> merged = mergeRiskFiles(targets, removalRisks);
+
+        // 安全网第二层：javax→jakarta 命名空间（javax.validation / javax.servlet / javax.persistence…）
+        List<String> legacyFiles = scanLegacyImportFiles(context.workspace());
+        Set<String> legacySet = legacyFiles.stream()
+                .map(f -> normalizePath(f).toLowerCase()).collect(Collectors.toSet());
+        List<String> afterLegacy = new ArrayList<>(merged);
+        for (String file : legacyFiles) {
+            if (!containsPath(afterLegacy, file)) {
+                afterLegacy.add(file);
+            }
+        }
+        merged = afterLegacy;
+
+        // 安全网第三层：Spring Boot 2→3 破坏性 API（如 RestTemplateConfig 用的 HttpComponentsClientHttpRequestFactory）
         Map<String, List<Spring3BreakingApiScanner.Finding>> breakingHits =
                 Spring3BreakingApiScanner.scanProject(context.workspace());
+        Set<String> breakingSet = breakingHits.keySet().stream()
+                .map(f -> normalizePath(f).toLowerCase()).collect(Collectors.toSet());
         merged = mergeBreakingApiFiles(merged, breakingHits);
 
         if (merged.size() != targets.size()) {
@@ -306,24 +318,71 @@ public class PlanNode implements NodeExecutor {
         log.info("规划完成（批语义）: {} 个文件待迁移 → {}（门禁 {}，单条整仓 VERIFY 依赖全部改写）",
                 targets.size(), targets, gate ? "开启" : "关闭");
 
-        return NodeOutcome.ok(effectivePlan(outcome.plan(), targets));
+        return NodeOutcome.ok(effectivePlan(outcome.plan(), targets, removalFlagsNorm, legacySet, breakingSet));
     }
 
-    /** 把 checkpoint 里的计划对齐到「实际会执行的文件」，避免评审看到的与实际不符。 */
-    private static PlanResult effectivePlan(PlanResult raw, List<String> targets) {
-        Map<String, String> rationaleByPath = new LinkedHashMap<>();
+    /**
+     * 把 checkpoint 里的计划对齐到「实际会执行的文件」，避免评审看到的与实际不符。
+     *
+     * <p>每个文件的理由优先级：模型给的（最具体）&gt; 确定性扫描能解释的原因（JDK 已移除 import /
+     * javax→jakarta / SB2→3 破坏性 API）&gt; 诚实的元描述兜底。
+     * 实测博客工程里模型会把文件列入清单却留空 rationale，若不兜底，评审界面会出现
+     * 「要改但没理由」的空白，反而让人不敢批准。确定性扫描的口径与安全网完全一致，
+     * 因此能给出可信的原因；三把尺子都解释不了的文件，也给一句诚实的元描述，不再留白。
+     */
+    private static PlanResult effectivePlan(PlanResult raw, List<String> targets,
+                                           Map<String, List<String>> removalFlagsNorm,
+                                           Set<String> legacySet, Set<String> breakingSet) {
+        Map<String, String> modelRationaleByPath = new LinkedHashMap<>();
         if (raw.steps() != null) {
             for (PlanResult.PlanStep step : raw.steps()) {
                 if (step.filePath() != null && !step.filePath().isBlank()) {
-                    rationaleByPath.putIfAbsent(step.filePath(), step.rationale());
+                    modelRationaleByPath.putIfAbsent(normalizePath(step.filePath()).toLowerCase(),
+                            step.rationale());
                 }
             }
         }
         List<PlanResult.PlanStep> steps = new ArrayList<>(targets.size());
         for (String filePath : targets) {
-            steps.add(new PlanResult.PlanStep(filePath, rationaleByPath.getOrDefault(filePath, "")));
+            String modelRationale = modelRationaleByPath.get(normalizePath(filePath).toLowerCase());
+            String rationale;
+            if (modelRationale != null && !modelRationale.isBlank()) {
+                rationale = modelRationale;
+            } else {
+                String derived = scannerReasonFor(filePath, removalFlagsNorm, legacySet, breakingSet);
+                rationale = (derived != null && !derived.isBlank())
+                        ? derived
+                        : "模型已将该文件列入本次迁移范围，但未附具体理由；确定性扫描未能定位具体遗留点，"
+                          + "该文件仍属本次迁移范围，请人工确认其必要性。";
+            }
+            steps.add(new PlanResult.PlanStep(filePath, rationale));
         }
         return new PlanResult(raw.summary(), steps);
+    }
+
+    /**
+     * 用确定性安全网的三把尺子给一个「理由为空」的文件补原因。
+     * 优先级与 {@link #mergeRiskFiles} / 第二层安全网 / 第三层安全网一致：
+     * JDK 已移除 import &gt; javax→jakarta &gt; SB2→3 破坏性 API。
+     * 三把尺子都解释不了返回 {@code null}，交由 {@link #effectivePlan} 给一句诚实的元描述兜底。
+     */
+    private static String scannerReasonFor(String filePath,
+                                          Map<String, List<String>> removalFlagsNorm,
+                                          Set<String> legacySet, Set<String> breakingSet) {
+        String norm = normalizePath(filePath).toLowerCase();
+        List<String> flags = removalFlagsNorm.get(norm);
+        if (flags != null && !flags.isEmpty()) {
+            return "该文件仍 import 了 JDK 已移除的包（如 " + String.join("、", flags)
+                    + "），不迁移会导致整个工程编译失败（确定性扫描确认）。";
+        }
+        if (legacySet != null && legacySet.contains(norm)) {
+            return "该文件仍含 javax→jakarta 命名空间的遗留 import（如 javax.validation / javax.servlet），"
+                    + "必须随整仓升级一起迁移（确定性扫描确认）。";
+        }
+        if (breakingSet != null && breakingSet.contains(norm)) {
+            return "该文件使用了 Spring Boot 2→3 的破坏性 API，底层实现已变更，必须改写（确定性扫描确认）。";
+        }
+        return null;
     }
 
     /** 读工作目录里的源码，抽出「路径 + 主类型 + 符号 + 移除风险」交给规划模型。 */
@@ -463,6 +522,17 @@ public class PlanNode implements NodeExecutor {
             }
         }
         return merged;
+    }
+
+    /** 路径归一化：反斜杠统一成斜杠，便于跨平台比对与做 map key。 */
+    private static String normalizePath(String path) {
+        return path == null ? "" : path.replace('\\', '/');
+    }
+
+    /** 大小写不敏感地判断清单是否已含某路径（安全网补文件时用同一口径比对）。 */
+    private static boolean containsPath(List<String> list, String path) {
+        String norm = normalizePath(path);
+        return list.stream().anyMatch(p -> normalizePath(p).equals(norm));
     }
 
     /** 按单价表估算成本 —— 与 span 上的 {@code llm.cost} 共用，避免两处算出两个数。 */
