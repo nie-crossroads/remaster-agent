@@ -66,6 +66,16 @@ public interface TaskStore {
 
     void updateTaskStatus(long taskId, TaskStatus status, String failReason);
 
+    /**
+     * 删除任务及其全部子表数据（节点 / 门禁 / 补丁 / 回写审计 / 成本 / trace）。
+     *
+     * <p>由调用方（Controller）先校验权限（ROOT）与状态（非 RUNNING）。删除顺序在
+     * 实现里保证不撞外键：先删依赖 {@code dag_node} 的子表，最后删主表。
+     *
+     * @return 被删除的主表行数（0 表示任务本就不存在）
+     */
+    int deleteTask(long taskId);
+
     /** 写入量化指标（JSON 字符串）。 */
     void saveTaskMetrics(long taskId, String metricsJson);
 

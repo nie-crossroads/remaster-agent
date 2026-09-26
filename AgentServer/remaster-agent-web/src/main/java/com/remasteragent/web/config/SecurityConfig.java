@@ -70,6 +70,9 @@ public class SecurityConfig {
                 .requestMatchers("/api/demo/**").authenticated()
                 // 当前登录者身份（角色）。登录页用它校验凭据，工作台用它决定列表可见范围
                 .requestMatchers("/api/auth/**").authenticated()
+                // 删除任务仅管理员（ROOT）可操作。建/查/取消/重跑等其余任务接口保持 permitAll
+                // （评测 harness 与演示都依赖它们），删除是唯一的管控面。
+                .requestMatchers(HttpMethod.DELETE, "/api/tasks/**").hasRole("ROOT")
                 .anyRequest().permitAll())
             // 无状态 Basic：每个请求自带凭据，服务端不存 session
             .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -88,7 +91,7 @@ public class SecurityConfig {
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration cfg = new CorsConfiguration();
         cfg.setAllowedOrigins(Arrays.asList(allowedOrigins));
-        cfg.setAllowedMethods(List.of("GET", "POST", "OPTIONS"));
+        cfg.setAllowedMethods(List.of("GET", "POST", "OPTIONS", "DELETE"));
         // Authorization 头由前端 Basic 鉴权拦截器手动带上，必须放行
         cfg.setAllowedHeaders(List.of("*"));
         cfg.setMaxAge(3600L);

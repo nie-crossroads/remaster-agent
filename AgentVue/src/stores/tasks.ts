@@ -1,7 +1,7 @@
-import { defineStore } from 'pinia'
+import { acceptHMRUpdate, defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { approveGate as approveGateApi, approvePlan as approvePlanApi, applyWriteBack as applyWriteBackApi, cancelTask as cancelTaskApi, createTask, describeError, getTask, getTaskTrace, listTasks, preflightWriteBack as preflightWriteBackApi, rejectGate as rejectGateApi, rejectPlan as rejectPlanApi, retryTask as retryTaskApi, runDemo } from '@/api/client'
+import { approveGate as approveGateApi, approvePlan as approvePlanApi, applyWriteBack as applyWriteBackApi, cancelTask as cancelTaskApi, createTask, deleteTask as deleteTaskApi, describeError, getTask, getTaskTrace, listTasks, preflightWriteBack as preflightWriteBackApi, rejectGate as rejectGateApi, rejectPlan as rejectPlanApi, retryTask as retryTaskApi, runDemo } from '@/api/client'
 import { openTaskEvents } from '@/api/sse'
 import type { CreateTaskRequest, ProgressEvent, TaskDetail, TaskTrace, TaskView, WriteBackReport } from '@/api/types'
 import { canCancelStatus, canRetryStatus } from '@/utils/status'
@@ -120,6 +120,15 @@ export const useTasksStore = defineStore('tasks', () => {
    */
   const controlling = ref(false)
   const controlError = ref<string | null>(null)
+
+  /**
+   * 删除任务进行中（按任务 id 区分，列表上只让那一行转圈）。
+   *
+   * 与 `controlling` 分开：删除按钮可能和「取消 / 重跑」同时可见，但**在途的请求不同**，
+   * 共用一个 busy 标志会让它们互相置灰。
+   */
+  const deletingId = ref<number | null>(null)
+  const deleteError = ref<string | null>(null)
 
   /**
    * 全链路 Trace 数据。
@@ -865,6 +874,34 @@ export const useTasksStore = defineStore('tasks', () => {
     }
   }
 
+  // -------- 删除任务（仅管理员；按钮显隐由 auth.isRoot 控制） --------
+
+  /**
+   * 删除一个任务。
+   *
+   * <p>成功后若删的是「当前正在看的任务」，退回新建模式（列表态），避免详情视图还挂着已删任务的残影；
+   * 并刷新列表让左侧立刻少一条。后端对 RUNNING 返回 409，前端直接把错误翻成提示即可 ——
+   * 不需要乐观改状态（删除没有「部分成功」的中间态）。
+   */
+  async function deleteTask(id: number): Promise<boolean> {
+    if (deletingId.value !== null) return false
+    deletingId.value = id
+    deleteError.value = null
+    try {
+      await deleteTaskApi(id)
+      if (currentDetail.value?.task.id === id) {
+        startCreate()
+      }
+      await refreshList()
+      return true
+    } catch (e) {
+      deleteError.value = describeError(e)
+      return false
+    } finally {
+      deletingId.value = null
+    }
+  }
+
   // -------- 全链路 Trace（阶段 3 收尾） --------
 
   /**
@@ -980,6 +1017,8 @@ export const useTasksStore = defineStore('tasks', () => {
     reviewError,
     controlling,
     controlError,
+    deletingId,
+    deleteError,
     trace,
     traceLoading,
     traceError,
@@ -1009,6 +1048,7 @@ export const useTasksStore = defineStore('tasks', () => {
     rejectCurrentGate,
     cancelCurrentTask,
     retryCurrentTask,
+    deleteTask,
     loadTrace,
     clearTrace,
     preflightWriteBack,
@@ -1017,3 +1057,9 @@ export const useTasksStore = defineStore('tasks', () => {
     teardown,
   }
 })
+
+// 让 Pinia store 支持 Vite HMR —— 否则改 store 时旧实例不重建，
+// 新加的 action（如 deleteTask）在运行实例上会缺失。
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useTasksStore, import.meta.hot))
+}

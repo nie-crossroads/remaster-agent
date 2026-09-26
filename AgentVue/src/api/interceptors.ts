@@ -4,12 +4,17 @@ import { http } from './client'
 import { useAuthStore } from '@/stores/auth'
 
 /**
- * 需要登录的端点前缀 —— 必须和 `SecurityConfig` 里 `authenticated()` 的那几条一一对应。
+ * 需要登录的端点前缀 —— 必须和 `SecurityConfig` 里需要身份的那几条一一对应。
  *
  * 其余业务端点（建任务、查详情、SSE）本来就不要求登录，硬塞一个头反而可能在未来某天
  * 被人误当成「全局鉴权」。所以这里是**白名单**，不是「除了公开的都挂上」。
+ *
+ * 注意 `DELETE /api/tasks/**`：后端配置为仅 ROOT 可删（见 SecurityConfig），
+ * 而 Basic 头不跨请求自动携带，必须由这里按前缀挂上，否则删除请求因无凭据被 401 拒掉、
+ * 任务却纹丝不动，表现就是「点了没反应、控制台报 401」。
+ * GET / POST /api/tasks/** 仍为 permitAll，挂上头也无害（后端直接忽略）。
  */
-const AUTHENTICATED_PREFIXES = ['/demo/', '/auth/']
+const AUTHENTICATED_PREFIXES = ['/demo/', '/auth/', '/tasks/']
 
 /**
  * 给需要登录的端点自动挂 Basic 鉴权头。

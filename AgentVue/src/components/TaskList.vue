@@ -8,6 +8,7 @@
  * 另外有一层展示过滤：演示账号只看得到演示任务，管理员（root）看全部，理由见下方 `visibleTasks`。
  */
 import { computed, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 
 import type { TaskStatus, TaskView } from '@/api/types'
 import { TASK_STATUS_LABEL, TASK_STATUS_TAG, formatCost, formatDurationPair } from '@/utils/status'
@@ -74,6 +75,20 @@ function targetTitle(task: TaskView): string {
 function targetName(task: TaskView): string {
   return task.entryFile ? (task.entryFile.split('/').pop() ?? task.entryFile) : '整仓升级'
 }
+
+/**
+ * 删除任务：仅管理员（auth.isRoot）能看到按钮，这里只管调用 store。
+ * 后端对 RUNNING 返回 409、非 ROOT 返回 403，store 会把错误信息翻成提示。
+ */
+function onDelete(id: number): void {
+  void tasks.deleteTask(id).then((ok) => {
+    if (ok) {
+      ElMessage.success(`已删除任务 #${id}`)
+    } else {
+      ElMessage.error(tasks.deleteError ?? '删除失败')
+    }
+  })
+}
 </script>
 
 <template>
@@ -125,6 +140,27 @@ function targetName(task: TaskView): string {
           <el-tag :type="TASK_STATUS_TAG[task.status]" size="small">
             {{ TASK_STATUS_LABEL[task.status] }}
           </el-tag>
+          <el-popconfirm
+            v-if="auth.isRoot"
+            title="删除该任务及其沙箱数据？"
+            confirm-button-text="删除"
+            cancel-button-text="取消"
+            confirm-button-type="danger"
+            :hide-after="0"
+            @confirm="onDelete(task.id)"
+          >
+            <template #reference>
+              <el-button
+                type="danger"
+                link
+                size="small"
+                :loading="tasks.deletingId === task.id"
+                @click.stop
+              >
+                删除
+              </el-button>
+            </template>
+          </el-popconfirm>
         </div>
         <div class="path" :title="targetTitle(task)">
           {{ targetText(task) }}

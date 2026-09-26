@@ -142,6 +142,26 @@ public class WorkspaceCleaner {
         return sweep(clock.instant());
     }
 
+    /**
+     * 立即删除指定任务的沙箱工作目录，无视任务状态与保留期。
+     *
+     * <p>供「删除任务」操作在删库的同时清掉磁盘现场。删除失败只记日志、不抛出 ——
+     * 留着的目录后续由 {@link #sweepIfDue()} 按终态 + 保留期兜底回收，不会泄漏。
+     * 目录本就不存在则静默返回（幂等）。
+     */
+    public void deleteTaskWorkspace(long taskId) {
+        Path dir = workspaceRoot.resolve("task-" + taskId);
+        if (!Files.exists(dir)) {
+            log.debug("待删沙箱目录不存在，跳过: {}", dir);
+            return;
+        }
+        if (deletePermanently(dir)) {
+            log.info("已删除任务 #{} 的沙箱工作目录: {}", taskId, dir);
+        } else {
+            log.warn("删除任务 #{} 的沙箱工作目录失败（回收器下一轮会重试）: {}", taskId, dir);
+        }
+    }
+
     private CleanupReport sweep(Instant now) {
         if (!Files.isDirectory(workspaceRoot)) {
             log.debug("沙箱根目录不存在或不是目录，跳过回收: {}", workspaceRoot);

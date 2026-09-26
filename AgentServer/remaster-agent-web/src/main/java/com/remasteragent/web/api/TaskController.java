@@ -12,6 +12,7 @@ import com.remasteragent.core.progress.ProgressPublisher;
 import com.remasteragent.core.queue.TaskQueue;
 import com.remasteragent.core.store.TaskStore;
 import com.remasteragent.core.trace.TracePropagation;
+import com.remasteragent.core.workspace.WorkspaceCleaner;
 import com.remasteragent.core.trace.TraceTracer;
 import com.remasteragent.web.api.dto.CreateTaskRequest;
 import com.remasteragent.web.api.dto.TaskDetailView;
@@ -28,6 +29,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -37,6 +39,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 迁移任务的 REST + SSE 接口。
@@ -64,6 +67,10 @@ public class TaskController {
     private final SseEventHub sseEventHub;
     private final ProgressPublisher progressPublisher;
     private final TraceTracer tracer;
+
+    /** 删除任务时一并清掉沙箱工作目录。非构造注入：单测构造器不依赖它，生产由 Spring 注入。 */
+    @Autowired
+    private WorkspaceCleaner workspaceCleaner;
 
     /** 单测入口：不埋点。 */
     public TaskController(TaskStore taskStore, TaskQueue taskQueue,
@@ -472,6 +479,44 @@ public class TaskController {
                 id, reset, nodes.size(), hasPending ? "有" : "无");
 
         return queryService.taskSummary(id);
+    }
+
+    /**
+     * 删除任务及其全部子表数据（节点 / 门禁 / 补丁 / 回写审计 / 成本 / trace）。
+     *
+     * <h3>权限：仅管理员（ROOT）</h3>
+     * 由 SecurityConfig 里的 {@code DELETE /api/tasks/** → hasRole("ROOT")} 路径规则兜底 ——
+     * 即使前端被绕过、用普通（DEMO）账号直接打这个接口，也会拿到 403。前端是否显示删除按钮
+     * 是另一层（按 {@code auth.isRoot} 控制），但两者同源：都看服务端签发的角色。
+     *
+     * <h3>RUNNING 任务不能删</h3>
+     * 正在运行的任务仍在沙箱里写数据：此刻删库会让 Worker 下一轮循环找不到任务行而报错，
+     * 删目录则会让正在跑的 {@code mvn test} 半途失根。所以<b>先取消、等其停下</b>再删 ——
+     * 与「协作式停止」的整体哲学一致，不做「硬删正在跑的东西」这种无法安全回滚的动作。
+     */
+    @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable long id) {
+        MigrationTask task = taskStore.findTask(id)
+                .orElseThrow(() -> new NotFoundException("任务不存在: " + id));
+        if (task.status() == TaskStatus.RUNNING) {
+            throw new ConflictException("任务 #" + id + " 正在运行，无法删除（请先取消，等其停下后再删）");
+        }
+        // 先删库（快，毫秒级），沙箱工作目录的清理放到后台线程。
+        // 否则大工程（如 125 文件 + target/ + Maven 本地仓库）的目录删除会拖垮这次 HTTP 请求，
+        // 前端 axios 15s 超时报错、任务却其实已经删掉了，用户看到的是假报错。
+        // 库删除后即便进程在后台清理前崩溃，留下来的孤儿目录也有 WorkspaceCleaner 按 mtime 兜底回收。
+        int removed = taskStore.deleteTask(id);
+        if (workspaceCleaner != null) {
+            CompletableFuture.runAsync(() -> {
+                try {
+                    workspaceCleaner.deleteTaskWorkspace(id);
+                } catch (Exception e) {
+                    log.warn("后台清理任务 #{} 的沙箱目录失败（回收器后续会重试）: {}", id, e.getMessage());
+                }
+            });
+        }
+        log.info("任务 #{} 已删除（移除主表行 {} 行，沙箱目录清理已在后台启动）", id, removed);
     }
 
     /**

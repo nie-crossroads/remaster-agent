@@ -115,6 +115,19 @@ export async function retryTask(id: number): Promise<TaskView> {
 }
 
 /**
+ * 删除任务 —— 仅管理员（ROOT）可调用，后端返回 204（无响应体）。
+ *
+ * 非 ROOT 用户即便绕过前端打这个接口，也会被 SecurityConfig 的
+ * `DELETE /api/tasks/** → hasRole("ROOT")` 拦下（403）。后端对 RUNNING 任务返回 409
+ * （需先取消），前端据 {@link describeError} 翻成提示即可，不需要乐观改状态。
+ */
+export async function deleteTask(id: number): Promise<void> {
+  // 删除要清掉沙箱目录（大工程目录可能很大），放宽到 60s，避免前端 15s 默认超时误报。
+  // 后端已把目录清理放后台线程，正常会远快于这个值。
+  await http.delete(`/tasks/${id}`, { timeout: 60_000 })
+}
+
+/**
  * 任务的全链路链路数据。
  *
  * 单独一个请求而不是塞进详情：一次任务可能产生几百条 span，

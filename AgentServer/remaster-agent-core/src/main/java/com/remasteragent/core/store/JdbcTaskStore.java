@@ -116,6 +116,23 @@ public class JdbcTaskStore implements TaskStore {
     }
 
     @Override
+    public int deleteTask(long taskId) {
+        // 顺序必须保证不撞外键：先删子表，最后删主表。
+        // human_gate / patch 只有 node_id 没有 task_id，靠 IN (SELECT id FROM dag_node ...) 间接定位。
+        jdbc.update("""
+                DELETE FROM human_gate WHERE node_id IN (SELECT id FROM dag_node WHERE task_id = ?)
+                """, taskId);
+        jdbc.update("""
+                DELETE FROM patch WHERE node_id IN (SELECT id FROM dag_node WHERE task_id = ?)
+                """, taskId);
+        jdbc.update("DELETE FROM dag_node WHERE task_id = ?", taskId);
+        jdbc.update("DELETE FROM llm_call WHERE task_id = ?", taskId);
+        jdbc.update("DELETE FROM trace_span WHERE task_id = ?", taskId);
+        jdbc.update("DELETE FROM source_write_back WHERE task_id = ?", taskId);
+        return jdbc.update("DELETE FROM migration_task WHERE id = ?", taskId);
+    }
+
+    @Override
     public void saveTaskMetrics(long taskId, String metricsJson) {
         jdbc.update("""
                 UPDATE migration_task SET metrics = CAST(? AS jsonb), updated_at = now() WHERE id = ?

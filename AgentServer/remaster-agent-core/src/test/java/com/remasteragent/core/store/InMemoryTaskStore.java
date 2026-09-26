@@ -111,6 +111,27 @@ public final class InMemoryTaskStore implements TaskStore {
                 .toList();
     }
 
+    @Override
+    public int deleteTask(long taskId) {
+        if (tasks.remove(taskId) == null) {
+            return 0;
+        }
+        // 对齐 JDBC 实现的外键顺序语义：先拿到本任务的全部节点 id，再清子表，最后清主表关联。
+        Set<Long> nodeIds = nodes.values().stream()
+                .filter(node -> node.taskId() == taskId)
+                .map(DagNode::id)
+                .collect(Collectors.toSet());
+        nodes.values().removeIf(node -> node.taskId() == taskId);
+        gates.values().removeIf(gate -> nodeIds.contains(gate.nodeId()));
+        patches.removeIf(patch -> nodeIds.contains(patch.nodeId()));
+        llmCalls.removeIf(call -> call.taskId() != null && call.taskId() == taskId);
+        spans.removeIf(span -> span.taskId() != null && span.taskId() == taskId);
+        writeBacks.removeIf(w -> w.taskId() == taskId);
+        metrics.remove(taskId);
+        approvedPlans.remove(taskId);
+        return 1;
+    }
+
     // ------------------------------------------------------------------
     // 规划评审（阶段 2）
     // ------------------------------------------------------------------
