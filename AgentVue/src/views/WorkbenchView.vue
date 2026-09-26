@@ -27,6 +27,7 @@ import TaskList from '@/components/TaskList.vue'
 import TraceTimeline from '@/components/TraceTimeline.vue'
 import WriteBackPanel from '@/components/WriteBackPanel.vue'
 import { useTasksStore } from '@/stores/tasks'
+import { useAuthStore } from '@/stores/auth'
 import {
   TASK_STATUS_LABEL,
   TASK_STATUS_TAG,
@@ -38,6 +39,9 @@ import {
 
 const tasks = useTasksStore()
 const route = useRoute()
+const auth = useAuthStore()
+const isDemo = computed(() => auth.username === 'demo')
+const SAMPLE_REPO = 'https://github.com/nie-crossroads/example-code/tree/main/remaster-agent-example'
 
 /**
  * 实时链路指示灯。
@@ -145,36 +149,27 @@ const topDuration = computed(() => {
 watch(() => detail.value?.task?.status, syncTicker)
 
 /**
- * 取消任务 —— 先确认再发请求。
+ * 任务进入「待人工审核」时弹框提示 —— 否则面试官/用户会看到任务「突然停住」却不知道为什么。
  *
- * <h3>为什么要确认</h3>
- * 取消是**不可逆的一步**：重跑虽然能从断点续上，但当前节点已经烧掉的时间和 token 拿不回来。
- *
- * <h3>为什么确认文案对 RUNNING 与其它状态不一样</h3>
- * 因为两者发生的事情完全不同：RUNNING 下请求只是「挂号」，任务还会再跑一会儿；
- * 其它状态下它会立刻停。用同一句文案，必然对其中一种情况撒谎 ——
- * 而用户据此形成的预期（「点完就停」/「点完还要等」）恰好决定了他会不会反复点击。
+ * 只在前一状态不是 WAITING_HUMAN 的<b>跳变瞬间</b>弹一次（初始加载时 oldVal 为 undefined，不会误弹）。
+ * 用 `detail.gate` 区分是「规划评审」还是「人工门禁（GATE）」两类暂停，给出对应的下一步指引。
  */
-async function onCancel(): Promise<void> {
-  const running = detail.value?.task.status === 'RUNNING'
-  try {
-    await ElMessageBox.confirm(
-      running
-        ? '任务正在执行。取消不会立刻中断：当前节点（可能是沙箱里的 mvn test）会先跑完，'
-          + '回到节点边界后才停 —— 强行杀子进程会留下半截工作目录。确定取消吗？'
-        : '确定取消这个任务吗？之后可以用「重跑」从断点继续，已成功的节点不会重跑。',
-      '取消任务',
-      { confirmButtonText: '确定取消', cancelButtonText: '再想想', type: 'warning' },
-    )
-  } catch {
-    // 用户点了「再想想」，什么都不做
-    return
-  }
-  const ok = await tasks.cancelCurrentTask()
-  if (ok) {
-    ElMessage.success(running ? '已请求取消，等当前节点跑完即停' : '任务已取消')
-  }
-}
+watch(
+  () => detail.value?.task?.status,
+  (newVal, oldVal) => {
+    if (newVal === 'WAITING_HUMAN' && oldVal && oldVal !== 'WAITING_HUMAN') {
+      const id = detail.value?.task.id
+      const isGate = detail.value?.gate != null
+      ElMessageBox.alert(
+        isGate
+          ? `任务 #${id} 已暂停，等待你审批一道人工门禁（GATE）。请在下方「人工门禁」面板点击「批准」或「驳回」。`
+          : `任务 #${id} 已完成分析，要修改的文件在「迁移计划」中显示，等待你的人工审核。请点击「批准并继续执行」或「驳回」。`,
+        '需要人工审核',
+        { confirmButtonText: '我知道了', type: 'warning' },
+      ).catch(() => {})
+    }
+  },
+)
 
 /**
  * 第一步：预检 —— 只查不写。
@@ -245,6 +240,9 @@ onUnmounted(() => {
   <div class="workbench">
     <header class="app-header">
       <h1>RemasterAgent · 遗留代码现代化工作台</h1>
+      <div v-if="isDemo" class="header-sample">
+        📢 样例工程地址：<a :href="SAMPLE_REPO" target="_blank" rel="noopener">{{ SAMPLE_REPO }}</a>
+      </div>
       <div class="header-meta">
         <span :title="sseHint">
           <span class="sse-state-dot" :class="tasks.pollingFallback ? 'polling' : tasks.sseState" />
@@ -273,48 +271,7 @@ onUnmounted(() => {
           <div class="card">
             <div class="detail-header">
               <div class="detail-head-row">
-                <h2>{{ lastTaskHeaderLabel }}</h2>
-                <!--
-                  任务控制按钮。可用性判据与后端闸门同源（store 的 canCancel / canRetry），
-                  避免出现「按钮亮着、点下去 409」—— 一个不承认自己不可用的界面比没有按钮更糟。
-
-                  尺寸与表单里的「提交任务」保持同一套（默认尺寸、不 plain）：
-                  这两个动作和提交是同一层级的动作，不该因为渲染在卡片头部就矮一截。
-                  颜色按**动作性质**分：重跑是主色（可逆、接着往下跑），
-                  取消是危险色（不可逆，且会丢掉当前节点已烧掉的时间和 token）。
-                  二者互斥（RUNNING 只给取消、FAILED|CANCELLED 只给重跑），不存在并排比较。
-                -->
-                <div class="controls">
-                  <el-button
-                    v-if="tasks.canCancel"
-                    type="danger"
-                    :loading="tasks.controlling"
-                    :disabled="tasks.cancellingInProgress"
-                    @click="onCancel"
-                  >
-                    {{ tasks.cancellingInProgress ? '正在取消…' : '取消任务' }}
-                  </el-button>
-                  <el-button
-                    v-if="tasks.canRetry"
-                    type="primary"
-                    :loading="tasks.controlling"
-                    @click="tasks.retryCurrentTask()"
-                  >
-                    重跑
-                  </el-button>
-                </div>
-              </div>
-
-              <!--
-                取消是协作式的：点下去之后任务可能还要跑几分钟才停。
-                这段时间界面必须说话，否则用户会以为按钮没生效而反复点击。
-              -->
-              <div v-if="tasks.cancellingInProgress" class="cancel-pending">
-                已请求取消，将在当前节点跑完后停止（节点内部无法安全中断，强行杀子进程会留下半截工作目录）
-              </div>
-
-              <div v-if="tasks.controlError" class="control-error">
-                {{ tasks.controlError }}
+                  <h2>{{ lastTaskHeaderLabel }}</h2>
               </div>
 
               <div v-if="detail.task.failReason" class="fail-reason">
@@ -472,29 +429,6 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.controls {
-  display: flex;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-
-/* 间距只由 gap 决定：Element Plus 会给相邻 el-button 再补一层 margin-left，
-   与 gap 叠加会变成双倍（按钮尺寸从 small 提到默认后更明显）。 */
-.controls :deep(.el-button + .el-button) {
-  margin-left: 0;
-}
-
-/* 「已请求取消」的提示：不染成红色 —— 取消不是错误，只是还没停下来 */
-.cancel-pending {
-  font-size: 12px;
-  color: var(--color-warning);
-}
-
-.control-error {
-  font-size: 12px;
-  color: var(--color-danger);
 }
 
 .trace-hint {

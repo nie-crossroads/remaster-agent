@@ -117,6 +117,26 @@ body {
   color: var(--text-muted);
 }
 
+.app-header .header-sample {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-header .header-sample a {
+  color: #409eff;
+  text-decoration: none;
+}
+
+.app-header .header-sample a:hover {
+  text-decoration: underline;
+}
+
 .sse-state-dot {
   display: inline-block;
   width: 8px;

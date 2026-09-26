@@ -23,7 +23,7 @@
  * 它只是输入助手，不是新的限制。
  */
 import { computed, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import type { CreateTaskRequest } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
@@ -171,6 +171,33 @@ async function onSubmitFree(): Promise<void> {
     ElMessage.success(`已提交任务 #${created.id}`)
   } else if (tasks.submitError) {
     ElMessage.error(tasks.submitError)
+  }
+}
+
+/**
+ * 取消任务 —— 先确认再发请求。逻辑原在 WorkbenchView，现随「取消 / 重跑」按钮
+ * 一并下沉到本组件（提交后的查看态里、与「提交任务」同一位置）。
+ *
+ * 确认文案对 RUNNING 与其它状态不一样：RUNNING 下取消只是「挂号」，任务还会再跑一会儿；
+ * 其它状态下会立刻停。用同一句文案必然对其中一种情况撒谎，故分开写。
+ */
+async function onCancel(): Promise<void> {
+  const running = viewTask.value?.status === 'RUNNING'
+  try {
+    await ElMessageBox.confirm(
+      running
+        ? '任务正在执行。取消不会立刻中断：当前节点（可能是沙箱里的 mvn test）会先跑完，'
+          + '回到节点边界后才停 —— 强行杀子进程会留下半截工作目录。确定取消吗？'
+        : '确定取消这个任务吗？之后可以用「重跑」从断点继续，已成功的节点不会重跑。',
+      '取消任务',
+      { confirmButtonText: '确定取消', cancelButtonText: '再想想', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  const ok = await tasks.cancelCurrentTask()
+  if (ok) {
+    ElMessage.success(running ? '已请求取消，等当前节点跑完即停' : '任务已取消')
   }
 }
 </script>
@@ -337,6 +364,41 @@ async function onSubmitFree(): Promise<void> {
           <el-radio :value="viewTargetJdk">{{ viewTargetJdk }}</el-radio>
         </el-radio-group>
       </el-form-item>
+
+      <!--
+        任务控制动作：与新建态的「提交任务」共用同一槽位（表单底部）。
+        查看态下按状态互斥展示：RUNNING 给「取消任务」，FAILED/CANCELLED 给「重跑」。
+        尺寸与「提交任务」保持同一套（默认尺寸、不 plain）；颜色按动作性质分：
+        重跑主色（可逆）、取消危险色（不可逆、丢掉已烧掉的时间和 token）。
+      -->
+      <div class="controls">
+        <el-button
+          v-if="tasks.canCancel"
+          type="danger"
+          :loading="tasks.controlling"
+          :disabled="tasks.cancellingInProgress"
+          @click="onCancel"
+        >
+          {{ tasks.cancellingInProgress ? '正在取消…' : '取消任务' }}
+        </el-button>
+        <el-button
+          v-if="tasks.canRetry"
+          type="primary"
+          :loading="tasks.controlling"
+          @click="tasks.retryCurrentTask()"
+        >
+          重跑
+        </el-button>
+      </div>
+
+      <!-- 取消是协作式的：点下去之后任务可能还要跑几分钟才停，这段时间界面必须说话 -->
+      <div v-if="tasks.cancellingInProgress" class="cancel-pending">
+        已请求取消，将在当前节点跑完后停止（节点内部无法安全中断，强行杀子进程会留下半截工作目录）
+      </div>
+
+      <div v-if="tasks.controlError" class="control-error">
+        {{ tasks.controlError }}
+      </div>
     </el-form>
   </div>
 </template>
@@ -359,5 +421,32 @@ async function onSubmitFree(): Promise<void> {
   padding: 1px 5px;
   border-radius: 4px;
   font-family: 'SFMono-Regular', Consolas, monospace;
+}
+
+/* 任务控制按钮区：与「提交任务」同一槽位、同一套尺寸（默认尺寸、不 plain），
+   颜色按动作性质分 —— 重跑主色、取消危险色，二者互斥不会并排。 */
+.controls {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin-top: 8px;
+}
+
+/* 间距只由 gap 决定：Element Plus 会给相邻 el-button 再补一层 margin-left，与 gap 叠加变双倍 */
+.controls :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+/* 「已请求取消」的提示：不染成红色 —— 取消不是错误，只是还没停下来 */
+.cancel-pending {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-warning);
+}
+
+.control-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-danger);
 }
 </style>
