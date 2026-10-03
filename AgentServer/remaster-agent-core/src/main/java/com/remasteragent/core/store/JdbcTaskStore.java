@@ -416,6 +416,24 @@ public class JdbcTaskStore implements TaskStore {
     }
 
     @Override
+    public int resetInterruptedNodes(long taskId) {
+        // 只对非终态节点动手：RUNNING 是「执行被任务失败打断」，PENDING 是「任务已结束没轮到」。
+        // 终态节点（SUCCEEDED/FAILED/SKIPPED）一个不碰，避免覆盖真实结论。
+        // 不带 task_id 的全局清残骸会误伤别的 Worker 的节点——这里必须按任务。
+        return jdbc.update("""
+                UPDATE dag_node
+                   SET status = CASE status WHEN 'RUNNING' THEN 'FAILED' ELSE 'SKIPPED' END,
+                       error = CASE
+                                 WHEN status = 'RUNNING' THEN '任务失败时节点正在执行，已标记为中断'
+                                 WHEN 'PENDING' THEN '任务已结束，节点未执行'
+                                 ELSE error
+                               END,
+                       finished_at = CASE WHEN status IN ('RUNNING', 'PENDING') THEN now() ELSE finished_at END
+                 WHERE task_id = ? AND status IN ('RUNNING', 'PENDING')
+                """, taskId);
+    }
+
+    @Override
     public int resetFailedNodes(long taskId) {
         // FAILED 与 SKIPPED 一起重置：回退链上它们成组出现，只放回一半会让最后一轮 VERIFY
         // 永远停在 SKIPPED，任务立刻再次判失败 —— 表现成「点了重跑但什么都没发生」。

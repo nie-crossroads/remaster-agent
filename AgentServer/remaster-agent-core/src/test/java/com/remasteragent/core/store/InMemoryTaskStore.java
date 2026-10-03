@@ -345,6 +345,21 @@ public final class InMemoryTaskStore implements TaskStore {
     }
 
     @Override
+    public int resetInterruptedNodes(long taskId) {
+        List<Long> interrupted = findNodes(taskId).stream()
+                .filter(node -> node.status() == NodeStatus.RUNNING || node.status() == NodeStatus.PENDING)
+                .map(DagNode::id)
+                .toList();
+        interrupted.forEach(nodeId -> replace(nodeId, node -> with(node,
+                node.status() == NodeStatus.RUNNING ? NodeStatus.FAILED : NodeStatus.SKIPPED,
+                node.resultJson(),
+                node.status() == NodeStatus.RUNNING
+                        ? "任务失败时节点正在执行，已标记为中断"
+                        : "任务已结束，节点未执行")));
+        return interrupted.size();
+    }
+
+    @Override
     public int resetFailedNodes(long taskId) {
         List<Long> failed = findNodes(taskId).stream()
                 .filter(node -> node.status() == NodeStatus.FAILED || node.status() == NodeStatus.SKIPPED)

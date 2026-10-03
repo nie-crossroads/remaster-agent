@@ -10,10 +10,11 @@
     <packaging>jar</packaging>
     <name>legacy-unfixable</name>
     <description>
-        反例工程：用来验证 RemasterAgent 的护栏而不是它的改写能力。
-        测试源码引用了不存在的类，构建在任何情况下都不可能通过 ——
-        而阶段 1 只改一个主源文件，模型无论如何都修不好它。
-        期望行为：跑满 3 轮后判定任务失败，且不产生第 4 次 LLM 调用。
+        反例工程：用来验证 RemasterAgent 的护栏，而不是它的改写能力。
+        三条迁移靶子（LegacyStockCsvParser → LegacyStockLedger → LegacyStockReport）都会被改写，
+        但测试源码引用了已被删除的类，test-compile 在任何情况下都不可能通过 ——
+        失败原因不在被改写的文件里，模型再怎么改主源文件也修不好它。
+        期望行为：三个文件各改写一轮、跑满 3 轮回退后判定任务失败，且不产生第 4 次重写调用。
     </description>
 
     <properties>

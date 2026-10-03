@@ -19,7 +19,7 @@ class DemoPropertiesTest {
     @Test
     @DisplayName("未配置 root 时用默认账号 root / remaster-root")
     void rootFallsBackToDefaults() {
-        DemoProperties props = new DemoProperties(true, List.of(), 2, null, null, null, null);
+        DemoProperties props = new DemoProperties(true, List.of(), 2, null, null, null, null, null);
 
         assertEquals("demo", props.username());
         assertEquals("remaster-demo", props.password());
@@ -30,13 +30,13 @@ class DemoPropertiesTest {
     @Test
     @DisplayName("显式配置（含空白串）时的取值")
     void explicitValuesAreKeptAndBlanksFallBack() {
-        DemoProperties explicit = new DemoProperties(true, List.of(), 2,
+        DemoProperties explicit = new DemoProperties(true, List.of(), 2, null,
                 "alice", "pw1", "bob", "pw2");
         assertEquals("alice", explicit.username());
         assertEquals("bob", explicit.rootUsername());
 
         // 空白串按「没配」处理，避免出现空用户名这种既登不进也说不清的状态
-        DemoProperties blank = new DemoProperties(true, List.of(), 2, "  ", "", "  ", "");
+        DemoProperties blank = new DemoProperties(true, List.of(), 2, null, "  ", "", "  ", "");
         assertEquals("demo", blank.username());
         assertEquals("remaster-demo", blank.password());
         assertEquals("root", blank.rootUsername());

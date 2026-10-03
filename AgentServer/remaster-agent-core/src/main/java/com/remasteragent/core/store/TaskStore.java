@@ -248,6 +248,20 @@ public interface TaskStore {
     int resetStaleRunningNodes(long taskId);
 
     /**
+     * 任务进入终态（失败/取消）时，把残留的非终态节点收尾：
+     * RUNNING → FAILED（执行被任务失败打断）、PENDING → SKIPPED（任务已结束，不会再轮到）。
+     *
+     * <p>为什么需要它：主循环是单线程的，正常情况下 finalize 时不会有 RUNNING 节点；
+     * 但「进程在节点执行途中被杀」或「异常分支提前返回」会留下 RUNNING 节点，
+     * 于是出现「列表已判失败、DAG 却还显示第二轮重写进行中」的自相矛盾——
+     * 列表徽标读 task.status（FAILED），DAG 读 node.status（RUNNING），两头对不上。
+     * 终态节点（SUCCEEDED/FAILED/SKIPPED）一个不碰，避免覆盖真实结论。
+     *
+     * @return 被收尾的节点数
+     */
+    int resetInterruptedNodes(long taskId);
+
+    /**
      * 把该任务里所有 FAILED / SKIPPED 的节点退回 PENDING，供人工重跑。
      *
      * <p>为什么连 SKIPPED 一起重置：回退链上「上游 REWRITE 失败 → 本轮 GATE/VERIFY 被跳过」

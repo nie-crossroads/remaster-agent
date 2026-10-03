@@ -28,14 +28,18 @@ examples/eval/
 ├── logparse-legacy/              # 正样本工程（日志解析域，4 个目标类）
 ├── csvreport-legacy/             # 正样本工程（报表域，4 个目标类）
 ├── authtoken-legacy/             # 正样本工程（令牌域，4 个目标类）
-├── legacy-demo/                  # 正样本工程（阶段 1 起的冒烟样本，1 个目标类）
-├── legacy-demo-complex/          # 正样本工程（类内耦合较大单文件，1 个目标类）
+├── multimodule-legacy/           # 正样本工程（多模块聚合，整仓升级拓扑）
+├── premise-broken/               # 负样本：源码里有语法坏文件（ANALYZE 阶段即前提不成立）
 ├── negative/
-│   ├── unfixable-test-compile-fail/   # 负样本：工程永远编不过
-│   ├── unfixable-api-leak/            # 负样本：改写必须动公开签名，被护栏拦住
-│   └── unsatisfiable-test/            # 负样本：同一调用被断言成矛盾结果
+│   ├── unfixable-api-leak/       # 负样本：改写必须动公开签名，被护栏拦住
+│   └── unsatisfiable-test/       # 负样本：同一调用被断言成矛盾结果
 └── (每个正样本工程内部：src/main/java 目标类 + src/test/java 行为契约测试 + pom.xml)
 ```
+
+> 另外两个「工程级」样本不在本目录，而是作为演示三剧本放在 `examples/` 下：
+> `legacy-demo`（3 个文件，简单成功）、`blog-service`（真实 SB2.7 工程整仓升级）、
+> `legacy-unfixable`（3 个文件能改但构建必然失败，演示回退上限）。
+> 前两者在 catalog 里各有条目；`blog-service` 刻意标 `ready: false`，原因见其 notes。
 
 > `eval-results/` 由 harness 运行时生成，已在 `.gitignore` 中忽略，不入库。
 

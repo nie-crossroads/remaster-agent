@@ -49,6 +49,15 @@ const emit = defineEmits<{
 const ready = computed(() => isWriteBackReady(props.report))
 const appliedNow = computed(() => isWriteBackApplied(props.report))
 
+/**
+ * 已经回写过源工程：要么本次执行结果已落盘（appliedNow），
+ * 要么详情里带回了历史留痕（applied —— 执行成功后 refreshCurrentDetail 会带上）。
+ * 只要命中其一，标题栏的「应用到源工程」按钮就隐藏，避免重复回写同一份产出。
+ * 注意：关掉确认弹窗会让本地的 report 变 null，但 applied 仍非空，
+ * 所以必须两个都判，单看 appliedNow 会在 dismiss 后让按钮复活。
+ */
+const hasWrittenBack = computed(() => appliedNow.value || props.applied != null)
+
 /** 时间戳渲染成本地时间；非法值原样显示，不编造一个「刚刚」。 */
 function formatTime(value: string | null): string {
   if (!value) return '—'
@@ -63,7 +72,7 @@ function formatTime(value: string | null): string {
       <div class="section-title">变更回写</div>
       <div class="wb-actions">
         <el-button
-          v-if="canWriteBack"
+          v-if="canWriteBack && !hasWrittenBack"
           type="danger"
           :loading="loading"
           :disabled="applying"

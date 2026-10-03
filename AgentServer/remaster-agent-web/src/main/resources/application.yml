@@ -78,27 +78,30 @@ remaster:
   # 详见 docs/DEMO_LANDING_ARCH_PLAN.md。样本路径绝不来自客户端，只从配置读取。
   demo:
     enabled: ${REMASTER_DEMO_ENABLED:false}
-    # 演示样本：一个样本 = 一个可直接运行的本地可信工程。
+    # 演示样本根目录：换机器只改这一个环境变量，样本 project-root 一律写「相对它的路径」。
+    # 由服务端 Path.resolve 拼成绝对路径，天然不会字符串拼接，本地 Windows / 服务器 Linux 都干净。
+    #   本地: REMASTER_DEMO_ROOT=E:/AITools/WorkBuddy/workspace/langchain-agent-java
+    #   服务器: REMASTER_DEMO_ROOT=/www/wwwroot/remaster-agent
     # 客户端只能选 key（前端下拉），路径永远由服务端从下面这份配置解析 —— 这是演示端点的安全边界。
-    # 默认指向本仓 examples/ 下的三个示例；换机器部署时覆盖对应环境变量即可，不必改代码。
+    root: ${REMASTER_DEMO_ROOT:E:/AITools/WorkBuddy/workspace/langchain-agent-java}
     samples:
       # 剧本一：小工程，三个文件各改写一轮就通过 —— 用来展示一次「正常迁移」的完整形状
       - key: legacy-demo
         name: 示例一 · 销售报表（简单工程，3 个文件；约 3~15 分钟）
-        project-root: ${REMASTER_DEMO_ROOT_LEGACY_DEMO:E:/AITools/WorkBuddy/workspace/langchain-agent-java/examples/legacy-demo}
+        project-root: examples/legacy-demo
         entry-file: src/main/java/com/example/legacy/LegacySalesReport.java
       # 剧本二：真实工程（Spring Boot 2.7 + Java 8，125 个源文件、43 个用 javax）。
       # 整仓升级：父 POM 升 3.x → 注入 jakarta 依赖 → 逐文件改写 → 整仓 VERIFY。
       # 耗时长是特性不是缺陷：它展示的是「几十个文件、多类改动一次收敛」。
       - key: blog-service
         name: 示例二 · 博客服务（真实工程整仓升级，耗时最长）
-        project-root: ${REMASTER_DEMO_ROOT_BLOG_SERVICE:E:/AITools/WorkBuddy/workspace/langchain-agent-java/examples/blog-service}
+        project-root: examples/blog-service
         entry-file: src/main/java/com/blog/BlogServiceApplication.java
       # 剧本三：三个文件都能改写成功，但测试源码引用了已被删除的类 —— 失败点不在改写范围里。
       # 用来展示护栏：跑满回退上限后如实判失败，而不是无限重试烧预算。
       - key: legacy-unfixable
         name: 示例三 · 库存台账（3 个文件都能改，但构建必然失败；约 10~20 分钟）
-        project-root: ${REMASTER_DEMO_ROOT_LEGACY_UNFIXABLE:E:/AITools/WorkBuddy/workspace/langchain-agent-java/examples/legacy-unfixable}
+        project-root: examples/legacy-unfixable
         entry-file: src/main/java/com/example/unfixable/LegacyStockLedger.java
     concurrency: ${REMASTER_DEMO_CONCURRENCY:2}
     # 演示登录共享凭据（HTTP Basic）。仅用于演示网关，不建用户表/多租户。
@@ -168,8 +171,12 @@ remaster:
     embedded: ${REMASTER_WORKER_EMBEDDED:false}
 
   queue:
-    stream-key: remaster:tasks
-    consumer-group: remaster-workers
+    # 本地与服务器共用同一台云 Redis 时，必须让两边用【不同的 stream key + 消费组】，
+    # 否则本地投递的任务消息会被服务器的 Worker 从共享队列里抢走消费（消费组竞争消费，
+    # 一条消息只进组内一个消费者），导致本地任务永远不被本地 Worker 执行、卡在 PENDING。
+    # 默认（服务器）用 remaster:tasks / remaster-workers；本地在 .env 里覆盖成 *-local 即可。
+    stream-key: ${REMASTER_QUEUE_STREAM_KEY:remaster:tasks}
+    consumer-group: ${REMASTER_QUEUE_CONSUMER_GROUP:remaster-workers}
     batch-size: 1
     block-millis: 5000
     reclaim-min-idle-seconds: 60

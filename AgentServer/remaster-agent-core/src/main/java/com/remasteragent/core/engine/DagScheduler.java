@@ -246,6 +246,9 @@ public class DagScheduler {
             finalizeTask(task, workspace);
         } catch (Exception e) {
             log.error("任务 #{} 执行失败", taskId, e);
+            // 收尾残留的 RUNNING 节点：异常分支提前返回时，正在执行的节点不会被正常置终态，
+            // 留着会让「列表已判失败、DAG 却还显示进行中」两头对不上。
+            taskStore.resetInterruptedNodes(taskId);
             taskStore.updateTaskStatus(taskId, TaskStatus.FAILED, e.getMessage());
             publish(ProgressEvent.taskStatus(taskId, TaskStatus.FAILED.name(), "任务异常终止: " + e.getMessage()));
             throw e;
@@ -989,6 +992,10 @@ public class DagScheduler {
                     metrics.llmCalls());
             publish(ProgressEvent.taskStatus(taskId, TaskStatus.SUCCEEDED.name(), "任务完成"));
         } else {
+            // 收尾残留的非终态节点：被依赖失败挡住、始终没轮到的 PENDING 节点，
+            // 在任务已失败时不应再显示成「等待」，统一标成「跳过」；理论上主循环单线程、
+            // finalize 时不会有 RUNNING 节点，这里仍兜底一次，防止「列表失败、DAG 仍在进行中」。
+            taskStore.resetInterruptedNodes(taskId);
             String reason = latestVerifyByFile.values().stream()
                     .filter(node -> node.status() != NodeStatus.SUCCEEDED)
                     .findFirst()

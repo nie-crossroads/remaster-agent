@@ -62,7 +62,7 @@ class DemoControllerTest {
     private static DemoProperties singleSample(boolean enabled, String projectRoot, int concurrency) {
         return new DemoProperties(enabled,
                 List.of(new DemoProperties.Sample("legacy-demo", "报表服务", projectRoot, null)),
-                concurrency, null, null, null, null);
+                concurrency, null, null, null, null, null);
     }
 
     @Test
@@ -89,7 +89,7 @@ class DemoControllerTest {
     @Test
     @DisplayName("没配样本 → 500，且不创建任务")
     void noSamplesReturns500() {
-        DemoProperties props = new DemoProperties(true, List.of(), 2, null, null, null, null);
+        DemoProperties props = new DemoProperties(true, List.of(), 2, null, null, null, null, null);
         when(taskStore.countActiveDemoTasks()).thenReturn(0);
         var ex = assertThrows(org.springframework.web.server.ResponseStatusException.class,
                 () -> controller(props).run(null));
@@ -139,7 +139,7 @@ class DemoControllerTest {
         DemoProperties props = new DemoProperties(true, List.of(
                 new DemoProperties.Sample("a", "样本A", first.toAbsolutePath().toString(), null),
                 new DemoProperties.Sample("b", "样本B", second.toAbsolutePath().toString(), null)),
-                2, null, null, null, null);
+                2, null, null, null, null, null);
         when(taskStore.countActiveDemoTasks()).thenReturn(0);
         when(taskStore.createTask(anyString(), any(), anyInt(), anyString(), eq(true))).thenReturn(7L);
         when(queryService.taskSummary(7L)).thenReturn(new TaskView(7L, second.toString(), null, "演示：样本B", 21,
@@ -147,7 +147,7 @@ class DemoControllerTest {
 
         controller(props).run(new DemoController.RunRequest("b"));
 
-        // 选 b 就必须落在 b 的目录上（而不是默认的 a）
+        // 选 b 就必须落在 b 的目录上（而不是默认的 a）；实际落库路径经 ProjectPathValidator 规范化为系统原生分隔符
         verify(taskStore).createTask(eq(second.toAbsolutePath().toString()), isNull(), eq(21), eq("演示：样本B"), eq(true));
     }
 
@@ -157,7 +157,7 @@ class DemoControllerTest {
         DemoProperties props = new DemoProperties(true, List.of(
                 new DemoProperties.Sample("legacy-demo", "示例一", "E:/p1", "src/main/java/A.java"),
                 new DemoProperties.Sample("legacy-unfixable", "示例三", "E:/p3", "src/main/java/C.java")),
-                2, null, null, null, null);
+                2, null, null, null, null, null);
 
         List<DemoController.SampleView> views = controller(props).samples();
 

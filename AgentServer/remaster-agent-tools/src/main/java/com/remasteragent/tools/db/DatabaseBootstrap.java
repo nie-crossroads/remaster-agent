@@ -72,14 +72,16 @@ public final class DatabaseBootstrap {
 
             // CREATE DATABASE 不能参数化（标识符不能当参数绑定），所以只能拼 SQL。
             // 库名来自我们自己的配置而非外部输入，但仍做一次合法性校验，避免意外注入。
+            // 放宽到允许连字符（remaster-test 这类命名）；拼 SQL 时给库名加双引号，
+            // 否则未加引号的 remaster-test 在 SQL 里会被解析成 remaster 减 test 而报错。
             String dbName = target.database();
-            if (!dbName.matches("[A-Za-z_][A-Za-z0-9_]*")) {
+            if (!dbName.matches("[A-Za-z_][A-Za-z0-9_-]*")) {
                 System.out.println(" [失败] 数据库名不合法: " + dbName);
                 return false;
             }
 
             try (Statement st = conn.createStatement()) {
-                st.executeUpdate("CREATE DATABASE " + dbName
+                st.executeUpdate("CREATE DATABASE \"" + dbName + "\""
                         + " WITH ENCODING 'UTF8' TEMPLATE template0");
                 System.out.println(" [成功] 已创建数据库 " + dbName);
                 return true;

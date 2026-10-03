@@ -11,6 +11,8 @@ import com.remasteragent.core.trace.TracePropagation;
 import com.remasteragent.web.api.dto.TaskView;
 import com.remasteragent.web.config.DemoProperties;
 import com.remasteragent.web.sse.SseEventHub;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -95,8 +97,25 @@ public class DemoController {
     @GetMapping("/samples")
     public List<SampleView> samples() {
         return demoProperties.samples().stream()
-                .map(s -> new SampleView(s.key(), s.name(), s.projectRoot(), s.entryFile(), DEMO_TARGET_JDK))
+                .map(s -> new SampleView(s.key(), s.name(), resolveRoot(s.projectRoot()), s.entryFile(), DEMO_TARGET_JDK))
                 .toList();
+    }
+
+    /**
+     * 把样本里的（相对或绝对）project-root 解析成绝对路径。
+     *
+     * <p>相对路径按 {@code demo.root} 拼接；绝对路径（兼容老配置/测试）直接采用，不会被字符串拼接污染。
+     * 相对写法若逃出 root 则拒绝，防目录穿越。路径在 run 时还会过 {@link ProjectPathValidator} 的存在性检查。
+     */
+    private String resolveRoot(String raw) {
+        Path base = Path.of(demoProperties.root()).toAbsolutePath().normalize();
+        Path full = base.resolve(raw == null ? "" : raw).normalize();
+        if (raw != null && !raw.isBlank() && !Path.of(raw).isAbsolute() && !full.startsWith(base)) {
+            throw new IllegalArgumentException("演示样本路径越出 demo.root: " + raw);
+        }
+        // 统一成正斜杠：Windows 的 Path.toString() 是反斜杠，但配置/前端/SampleView 全程用正斜杠，
+        // 避免同一条路径在「显示、diff、URL」各处长得不一样。
+        return full.toString().replace('\\', '/');
     }
 
     /**
@@ -133,7 +152,7 @@ public class DemoController {
                                 + demoProperties.samples().stream().map(DemoProperties.Sample::key).toList() + "）"));
 
         ProjectPathValidator.ResolvedInput input = ProjectPathValidator.validate(
-                sample.projectRoot(), sample.entryFile());
+                resolveRoot(sample.projectRoot()), sample.entryFile());
 
         String taskName = "演示：" + (sample.name() == null || sample.name().isBlank() ? sample.key() : sample.name());
         long taskId = taskStore.createTask(input.projectRoot().toString(), input.entryFile(),

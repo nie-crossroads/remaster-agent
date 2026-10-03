@@ -42,6 +42,8 @@ public record DemoProperties(
         List<Sample> samples,
         /** 同时进行的演示任务上限（mvn test 很重，避免一个面试官的跑批饿死其他人）。默认 2。 */
         Integer concurrency,
+        /** 演示样本根目录：样本 project-root 写成相对它的路径，由服务端 Path.resolve 拼成绝对路径。换机器只改这一个环境变量。 */
+        String root,
         /** 演示登录共享账号用户名。仅用于演示网关，不建用户表/多租户。默认 demo。 */
         String username,
         /** 演示登录共享密码。生产部署务必通过环境变量覆盖，不要用默认值。默认 remaster-demo。 */
@@ -56,6 +58,7 @@ public record DemoProperties(
         // 防御性拷贝：List.copyOf 既避免外部改动配置，又顺带把 null 元素挡在外面（会直接 NPE，比下游静默出错好）
         samples = samples == null ? List.of() : List.copyOf(samples);
         concurrency = (concurrency == null || concurrency <= 0) ? 2 : concurrency;
+        root = (root == null) ? "" : root;
         username = (username == null || username.isBlank()) ? "demo" : username;
         password = (password == null || password.isBlank()) ? "remaster-demo" : password;
         rootUsername = (rootUsername == null || rootUsername.isBlank()) ? "root" : rootUsername;

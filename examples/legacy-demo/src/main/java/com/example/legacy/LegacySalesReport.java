@@ -12,14 +12,15 @@ import java.util.Locale;
 import java.util.TimeZone;
 
 /**
- * 遗留的销售报表生成器 —— RemasterAgent 的迁移目标文件。
+ * 遗留的销售报表生成器 —— RemasterAgent 的迁移目标文件（本工程的<b>入口文件</b>）。
  *
- * <p>这个类刻意把 JDK 8 时代最常见的几类写法集中到一处，让「现代化」这件事有具体的靶子：
+ * <p>它把 JDK 8 时代最常见的几类写法集中到一处，让「现代化」这件事有具体靶子：
  * <ul>
  *   <li>显式装箱 {@code Double.valueOf} 与显式拆箱 {@code doubleValue()}（JDK 9 起视为冗余）</li>
  *   <li>{@link Comparator} 匿名内部类 → lambda / 方法引用</li>
  *   <li>{@link Date} + {@link Calendar} + {@link SimpleDateFormat} → {@code java.time}</li>
  *   <li>手工 {@code StringBuilder} 拼接多行文本 → text block</li>
+ *   <li>下标循环 + 显式 {@code ArrayList<Double>} 泛型 → 增强 for / {@code var} / 流</li>
  * </ul>
  *
  * <p>这些写法在 JDK 21 上<b>全都能编译</b>。这一点很重要：它意味着「遗留」不等于「编译不过」，
@@ -27,6 +28,9 @@ import java.util.TimeZone;
  * 而是「改写之后行为是否一字不差」—— 这正是 {@code src/test} 下那组测试的作用。
  *
  * <p>公开方法签名与输出文本是本类的<b>可观测契约</b>，迁移后必须逐字保持不变。
+ * 报表的数据来源是 {@link LegacySalesRecord}（另一条迁移靶子），
+ * 因此它必须与 {@code LegacySalesRecord} 一起迁移，否则整仓编译不过 —— 这是本样例
+ * 「一次要改多个文件」的部分由来。
  */
 public class LegacySalesReport {
 
@@ -37,6 +41,7 @@ public class LegacySalesReport {
     private static final String DATE_PATTERN = "yyyy-MM-dd";
 
     private final List<Double> amounts = new ArrayList<Double>();
+    private final List<String> customers = new ArrayList<String>();
     private final Date generatedAt;
 
     /** 无参构造：以当前时刻生成。 */
@@ -59,8 +64,22 @@ public class LegacySalesReport {
         amounts.add(Double.valueOf(amount));
     }
 
+    /** 追加一条销售记录，同时记下客户名。 */
+    public LegacySalesReport add(LegacySalesRecord record) {
+        if (record != null) {
+            addAmount(record.amount());
+            customers.add(record.customer());
+        }
+        return this;
+    }
+
     public int size() {
         return amounts.size();
+    }
+
+    /** 出现过的客户名（按加入顺序，允许重复）。 */
+    public List<String> customers() {
+        return new ArrayList<String>(customers);
     }
 
     public double total() {

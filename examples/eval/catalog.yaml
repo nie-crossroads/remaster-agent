@@ -92,17 +92,27 @@ cases:
     ready: true
     title: 阶段 1 起就在用的冒烟样本（装箱 / 匿名 Comparator / Date / 文本块）
     patterns: [money-double, boxing, date-time, anonymous-inner-class, comparator, string-concat]
-    notes: 最老的样本，也是唯一一个被反复手工跑过的 —— 它绿了不代表新样本对，但红了必是回归。
+    notes: >
+      最老的样本，也是唯一一个被反复手工跑过的 —— 它绿了不代表新样本对，但红了必是回归。
+      2026-09-22 起它一次要改三个文件（CsvReader → Record → Report 互相调用），
+      单测 37 条钉住行为契约：多文件批语义的日常回归就靠它。
 
-  - id: complex-customer-orders
-    project: examples/legacy-demo-complex
-    entryFile: src/main/java/com/example/legacy/LegacyCustomerOrders.java
+  - id: realworld-blog-service
+    project: examples/blog-service
+    entryFile: src/main/java/com/blog/BlogServiceApplication.java
     targetJdk: 21
     expect: SUCCEEDED
-    ready: true
-    title: 类内多职责耦合的较大单文件（跨方法一致性）
-    patterns: [date-time, anonymous-inner-class, legacy-collections, string-concat, boxing]
-    notes: 单文件内的耦合型样本，用于对照 billing-legacy 那种「同工程多文件解耦」的形态。
+    ready: false
+    title: 真实工程整仓升级（Spring Boot 2.7 → 3.x，43 个 javax 文件迁 jakarta）
+    patterns: [jakarta-namespace, spring-boot-parent, dependency-coordinates, sb3-breaking-api]
+    notes: >
+      作者真实项目（125 个源文件、43 个 import javax.*）复制而来，凭据已脱敏。
+      考的是大面收敛：父 POM 升 3.x → 注入 jakarta 依赖 → 全量改写 → 整仓 VERIFY，
+      而不是单文件改写质量；两条确定性安全网（JDK 移除包扫描 + LegacyImportDetector）
+      在它身上才是主角。
+      刻意不标 ready：单例耗时以十分钟计（几十次 LLM 调用），按 harness 默认
+      --timeout=15 分钟会被判超时。要用它跑批，显式加 --timeout=60 —— 先把它标成 ready
+      会让默认跑批出现「样本本身的超时」而非「Agent 的失败」，那是假红。
 
   # ==================================================================
   # 负样本 —— 期望失败（这一组决定了成功率的分子有没有意义）
@@ -116,11 +126,11 @@ cases:
     targetJdk: 21
     expect: FAILED
     ready: true
-    title: 入口文件可改但工程永远编不过（测试引用了已删除的类）
-    patterns: [legacy-collections, boxing]
+    title: 三个文件都能改，但工程永远编不过（测试引用了已删除的类）
+    patterns: [legacy-collections, boxing, date-time]
     notes: >
-      考的是失败收敛：ANALYZE / REWRITE 都会成功，VERIFY 必然失败，
-      且失败信息指向另一个文件。正确行为是在 max-rewrite-attempts 轮之后停下，
+      考的是失败收敛：ANALYZE / REWRITE 都会成功（3 个文件各改一轮），VERIFY 必然失败，
+      且失败信息指向另一个文件（测试源码）。正确行为是在 max-rewrite-attempts 轮之后停下，
       而不是把预算无限烧在一个不可能的任务上。
 
   # ==================================================================

@@ -307,6 +307,23 @@ export const useTasksStore = defineStore('tasks', () => {
     }
   }
 
+  /**
+   * 任务已到终态时，把详情里残留的非终态节点（RUNNING/PENDING）规范成终态显示。
+   *
+   * <p>后端在 finalize / 异常分支偶尔会留下 RUNNING 节点（进程在收尾那一刻没把正在执行的
+   * 节点置终态），于是出现「列表已判失败、DAG 却还显示第二轮重写进行中」的自相矛盾。
+   * 任务既已终态，节点不可能还在跑——这里在渲染前把它显示成终态，纯展示修正，不改库。
+   * 根因由后端 `DagScheduler.resetInterruptedNodes` 兜住（新任务不再产生这种脏数据）。
+   */
+  function normalizeTerminalNodes(detail: TaskDetail): void {
+    const status = detail.task.status
+    if (status !== 'FAILED' && status !== 'SUCCEEDED' && status !== 'CANCELLED') return
+    for (const node of detail.nodes) {
+      if (node.status === 'RUNNING') node.status = 'FAILED'
+      else if (node.status === 'PENDING') node.status = 'SKIPPED'
+    }
+  }
+
   // -------- actions --------
 
   async function refreshList(): Promise<void> {
@@ -351,7 +368,9 @@ export const useTasksStore = defineStore('tasks', () => {
     // 否则刚切过来还没等到快照就会被兜底轮询抢先触发一次多余的请求。
     markEvent()
     try {
-      currentDetail.value = await getTask(id)
+      const detail = await getTask(id)
+      normalizeTerminalNodes(detail)
+      currentDetail.value = detail
     } catch (e) {
       currentError.value = describeError(e)
       sseState.value = 'closed'
@@ -362,6 +381,7 @@ export const useTasksStore = defineStore('tasks', () => {
     closeCurrentEvents = openTaskEvents(id, {
       onSnapshot(detail) {
         // 后续的快照（重连时也会再发一次）覆盖当前状态
+        normalizeTerminalNodes(detail)
         currentDetail.value = detail
         // 同步左侧列表，避免列表与右上角详情对不上
         patchListTask(detail.task)
@@ -445,6 +465,7 @@ export const useTasksStore = defineStore('tasks', () => {
     try {
       const fresh = await getTask(cur.task.id)
       carryOverProgressMessages(fresh, currentDetail.value)
+      normalizeTerminalNodes(fresh)
       currentDetail.value = fresh
       patchListTask(fresh.task)
     } catch (e) {

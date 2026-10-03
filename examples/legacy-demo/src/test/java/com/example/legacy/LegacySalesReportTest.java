@@ -189,4 +189,43 @@ class LegacySalesReportTest {
         assertEquals(0, report.size());
         assertTrue(report.generatedInMonth(now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1));
     }
+
+    // ------------------------------------------------------------------
+    // 与 LegacySalesRecord 的衔接：三个迁移靶子之间的调用链
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("add(记录)：金额进合计，客户名被记下")
+    void addRecordFeedsAmountAndCustomer() {
+        LegacySalesReport report = new LegacySalesReport(FIXED_EPOCH_MILLIS)
+                .add(LegacySalesRecord.parse("2023-11-14|customer-7|30.00"))
+                .add(LegacySalesRecord.parse("2023-11-14|customer-3|10.00"));
+
+        assertEquals(2, report.size());
+        assertEquals(40d, report.total(), 1e-9);
+        assertEquals(List.of("customer-7", "customer-3"), report.customers());
+    }
+
+    @Test
+    @DisplayName("add(null) 被忽略，不改变任何状态")
+    void addNullRecordIsIgnored() {
+        LegacySalesReport report = new LegacySalesReport(FIXED_EPOCH_MILLIS).add(null);
+
+        assertEquals(0, report.size());
+        assertEquals(0d, report.total(), 1e-9);
+        assertTrue(report.customers().isEmpty());
+    }
+
+    @Test
+    @DisplayName("customers() 返回快照：取完之后再追加，已取出的列表不变")
+    void customersIsSnapshot() {
+        LegacySalesReport report = new LegacySalesReport(FIXED_EPOCH_MILLIS)
+                .add(LegacySalesRecord.parse("2023-11-14|customer-7|10.00"));
+        List<String> snapshot = report.customers();
+
+        report.add(LegacySalesRecord.parse("2023-11-14|customer-3|10.00"));
+
+        assertEquals(List.of("customer-7"), snapshot);
+        assertEquals(List.of("customer-7", "customer-3"), report.customers());
+    }
 }
